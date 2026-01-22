@@ -8,8 +8,8 @@ Welcome to the TQDBProxy documentation. TQDBProxy is a unified data layer that s
   - [Cache](components/cache/README.md)
   - [Metrics](components/metrics/README.md)
   - [MySQL Protocol](components/mysql/README.md)
+  - [PostgreSQL Protocol](components/postgres/README.md)
   - [SQL Parser](components/parser/README.md)
-  - [Generic Proxy](components/proxy/README.md)
   - [Replica Management](components/replica/README.md)
 - [Client Libraries](clients/README.md)
 
@@ -22,8 +22,8 @@ TQDBProxy is composed of several modular components:
 - **[Cache](components/cache/README.md)**: Manages in-memory storage using the Otter library.
 - **[Metrics](components/metrics/README.md)**: Collects and exposes Prometheus-compatible metrics.
 - **[MySQL](components/mysql/README.md)**: Handles the MySQL-specific wire protocol and query interception.
+- **[PostgreSQL](components/postgres/README.md)**: Handles the PostgreSQL-specific wire protocol and query interception.
 - **[Parser](components/parser/README.md)**: Extracts metadata and hints from SQL queries.
-- **[Proxy](components/proxy/README.md)**: Provides a generic TCP proxy implementation.
 - **[Replica](components/replica/README.md)**: Manages database connection pools and health checks.
 
 ---
