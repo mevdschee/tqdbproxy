@@ -13,6 +13,7 @@ import (
 	"github.com/mevdschee/tqdbproxy/cache"
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
+	"github.com/mevdschee/tqdbproxy/replica"
 )
 
 const (
@@ -38,17 +39,19 @@ func queryTypeLabel(t parser.QueryType) string {
 
 // Proxy handles MySQL protocol connections with caching
 type Proxy struct {
-	listen  string
-	backend string
-	cache   *cache.Cache
+	listen      string
+	backend     string // Deprecated: for backward compatibility
+	replicaPool *replica.Pool
+	cache       *cache.Cache
 }
 
 // New creates a new MySQL proxy
-func New(listen, backend string, c *cache.Cache) *Proxy {
+func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
-		listen:  listen,
-		backend: backend,
-		cache:   c,
+		listen:      listen,
+		backend:     pool.GetPrimary(), // For backward compatibility
+		replicaPool: pool,
+		cache:       c,
 	}
 }
 

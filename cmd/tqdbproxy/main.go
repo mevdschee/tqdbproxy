@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/mevdschee/tqdbproxy/cache"
 	"github.com/mevdschee/tqdbproxy/config"
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/mysql"
 	"github.com/mevdschee/tqdbproxy/proxy"
+	"github.com/mevdschee/tqdbproxy/replica"
 )
 
 func main() {
@@ -43,14 +46,23 @@ func main() {
 		log.Fatalf("Failed to create cache: %v", err)
 	}
 
-	// Start MySQL proxy with caching
-	mysqlProxy := mysql.New(cfg.MySQL.Listen, cfg.MySQL.Backend, queryCache)
+	// Create MySQL replica pool
+	mysqlPool := replica.NewPool(cfg.MySQL.Primary, cfg.MySQL.Replicas)
+	log.Printf("[MySQL] Primary: %s, Replicas: %v", cfg.MySQL.Primary, cfg.MySQL.Replicas)
+
+	// Start health checks for MySQL replicas
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go mysqlPool.StartHealthChecks(ctx, 10*time.Second)
+
+	// Start MySQL proxy with replica pool
+	mysqlProxy := mysql.New(cfg.MySQL.Listen, mysqlPool, queryCache)
 	if err := mysqlProxy.Start(); err != nil {
 		log.Fatalf("Failed to start MySQL proxy: %v", err)
 	}
 
 	// Start PostgreSQL proxy (transparent for now)
-	pgProxy := proxy.New("PostgreSQL", cfg.Postgres.Listen, cfg.Postgres.Backend)
+	pgProxy := proxy.New("PostgreSQL", cfg.Postgres.Listen, cfg.Postgres.Primary)
 	if err := pgProxy.Start(); err != nil {
 		log.Fatalf("Failed to start PostgreSQL proxy: %v", err)
 	}

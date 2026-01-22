@@ -16,6 +16,13 @@ func TestMetrics_Init(t *testing.T) {
 func TestMetrics_Handler(t *testing.T) {
 	Init()
 
+	// Increment metrics so they appear in output
+	QueryTotal.WithLabelValues("test.go", "1", "select", "false").Inc()
+	QueryLatency.WithLabelValues("test.go", "1", "select").Observe(0.001)
+	CacheHits.WithLabelValues("test.go", "1").Inc()
+	CacheMisses.WithLabelValues("test.go", "1").Inc()
+	DatabaseQueries.WithLabelValues("primary").Inc()
+
 	// Create a test request to /metrics
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	w := httptest.NewRecorder()
