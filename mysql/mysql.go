@@ -349,9 +349,9 @@ func (c *clientConn) handleQuery(query string) error {
 	start := time.Now()
 	parsed := parser.Parse(query)
 
-	// Debug: log the query and parsed metadata
-	log.Printf("[MySQL] Raw query from client: %q", query)
-	log.Printf("[MySQL] Parsed - File: %q, Line: %d, TTL: %d, Clean query: %q", parsed.File, parsed.Line, parsed.TTL, parsed.Query)
+	// Debug: log the query and parsed metadata (commented out for performance)
+	// log.Printf("[MySQL] Raw query from client: %q", query)
+	// log.Printf("[MySQL] Parsed - File: %q, Line: %d, TTL: %d, Clean query: %q", parsed.File, parsed.Line, parsed.TTL, parsed.Query)
 
 	file := parsed.File
 	if file == "" {

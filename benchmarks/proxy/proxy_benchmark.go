@@ -13,16 +13,21 @@ import (
 )
 
 func main() {
-	user := flag.String("user", "php-crud-api", "MySQL user")
-	pass := flag.String("pass", "php-crud-api", "MySQL password")
-	db := flag.String("db", "php-crud-api", "MySQL database")
+	user := flag.String("user", "", "MySQL user")
+	pass := flag.String("pass", "", "MySQL password")
+	db := flag.String("db", "", "MySQL database")
 	connections := flag.Int("c", 10, "Number of concurrent connections")
 	duration := flag.Int("t", 3, "Test duration in seconds")
-	csvOutput := flag.Bool("csv", false, "Output CSV format")
+	csvFile := flag.String("csv", "", "Write CSV output to file")
 	flag.Parse()
 
-	directDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/%s", *user, *pass, *db)
-	proxyDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3307)/%s", *user, *pass, *db)
+	// Build DSN - handle empty password and database
+	auth := *user
+	if *pass != "" {
+		auth = *user + ":" + *pass
+	}
+	directDSN := fmt.Sprintf("%s@tcp(127.0.0.1:3306)/%s", auth, *db)
+	proxyDSN := fmt.Sprintf("%s@tcp(127.0.0.1:3307)/%s", auth, *db)
 
 	// Test cases: different query complexities
 	testCases := []struct {
@@ -37,15 +42,25 @@ func main() {
 		{"SLEEP(10ms)", 10, "SELECT SLEEP(0.01)", "/* ttl:60 */ SELECT SLEEP(0.01)"},
 	}
 
-	if *csvOutput {
-		fmt.Printf("# Connections: %d\n", *connections)
-		fmt.Println("QueryType,SleepMs,DirectRPS,ProxyRPS,CacheRPS")
-	} else {
-		fmt.Printf("MySQL Proxy Benchmark (%d connections, %ds per test)\n", *connections, *duration)
-		fmt.Println("============================================================")
-		fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
-		fmt.Println("------------------------------------------------------------")
+	// Open CSV file if specified
+	var csvOut *os.File
+	if *csvFile != "" {
+		var err error
+		csvOut, err = os.Create(*csvFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create CSV file: %v\n", err)
+			os.Exit(1)
+		}
+		defer csvOut.Close()
+		fmt.Fprintf(csvOut, "# Connections: %d\n", *connections)
+		fmt.Fprintln(csvOut, "QueryType,SleepMs,DirectRPS,ProxyRPS,CacheRPS")
 	}
+
+	// Always print to stdout
+	fmt.Printf("MySQL Proxy Benchmark (%d connections, %ds per test)\n", *connections, *duration)
+	fmt.Println("============================================================")
+	fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
+	fmt.Println("------------------------------------------------------------")
 
 	for _, tc := range testCases {
 		directRPS := benchmarkConcurrent(directDSN, tc.query, *connections, *duration)
@@ -55,10 +70,12 @@ func main() {
 		primeCache(proxyDSN, tc.cached)
 		cacheRPS := benchmarkConcurrent(proxyDSN, tc.cached, *connections, *duration)
 
-		if *csvOutput {
-			fmt.Printf("%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
-		} else {
-			fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
+		// Always print to stdout
+		fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
+
+		// Write to CSV if specified
+		if csvOut != nil {
+			fmt.Fprintf(csvOut, "%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
 		}
 	}
 }
