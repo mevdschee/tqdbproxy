@@ -55,6 +55,9 @@ func Parse(query string) *ParsedQuery {
 		if matches[6] != "" {
 			p.Line, _ = strconv.Atoi(matches[6])
 		}
+		// Remove the hint comment from the query
+		p.Query = hintRegex.ReplaceAllString(query, "")
+		p.Query = strings.TrimSpace(p.Query)
 	}
 
 	// Determine query type
