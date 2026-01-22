@@ -122,6 +122,12 @@ func PutLengthEncodedInt(n uint64) []byte {
 	}
 }
 
+// PutLengthEncodedString encodes a string with its length prefix
+func PutLengthEncodedString(s []byte) []byte {
+	result := PutLengthEncodedInt(uint64(len(s)))
+	return append(result, s...)
+}
+
 // ReadLengthEncodedInt reads a MySQL length-encoded integer
 // Returns: value, isNull, bytesRead
 func ReadLengthEncodedInt(b []byte) (uint64, bool, int) {

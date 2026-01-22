@@ -121,6 +121,10 @@ type clientConn struct {
 	salt       []byte
 	db         string
 	backendDB  *sql.DB // Dedicated backend connection
+
+	// Last query metadata for SHOW TQDB STATUS
+	lastQueryBackend  string
+	lastQueryCacheHit bool
 }
 
 func (c *clientConn) handshake() error {
@@ -320,7 +324,7 @@ func (c *clientConn) handleBegin() error {
 		return err
 	}
 	c.status |= SERVER_STATUS_IN_TRANS
-	return c.writeOK()
+	return c.writeOKWithInfo("")
 }
 
 func (c *clientConn) handleCommit() error {
@@ -329,7 +333,7 @@ func (c *clientConn) handleCommit() error {
 		return err
 	}
 	c.status &= ^uint16(SERVER_STATUS_IN_TRANS)
-	return c.writeOK()
+	return c.writeOKWithInfo("")
 }
 
 func (c *clientConn) handleRollback() error {
@@ -338,7 +342,7 @@ func (c *clientConn) handleRollback() error {
 		return err
 	}
 	c.status &= ^uint16(SERVER_STATUS_IN_TRANS)
-	return c.writeOK()
+	return c.writeOKWithInfo("")
 }
 
 func (c *clientConn) handleQuery(query string) error {
@@ -371,12 +375,22 @@ func (c *clientConn) handleQuery(query string) error {
 		return c.handleRollback()
 	}
 
+	// Check for custom SHOW TQDB STATUS command
+	if queryUpper == "SHOW TQDB STATUS" {
+		return c.handleShowTQDBStatus()
+	}
+
 	// Check cache
 	if parsed.IsCacheable() {
 		if cached, ok := c.proxy.cache.Get(parsed.Query); ok {
 			metrics.CacheHits.WithLabelValues(file, line).Inc()
 			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
 			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+			// Track metadata for SHOW TQDB STATUS
+			c.lastQueryBackend = "cache"
+			c.lastQueryCacheHit = true
+
 			return c.writeRaw(cached)
 		}
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
@@ -396,6 +410,10 @@ func (c *clientConn) handleQuery(query string) error {
 		metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
 		metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
+		// Track metadata for SHOW TQDB STATUS
+		c.lastQueryBackend = "primary"
+		c.lastQueryCacheHit = false
+
 		// Send OK packet with affected rows
 		c.sequence++
 		okPacket := WriteOKPacket(uint64(affectedRows), uint64(lastInsertId), c.status, c.capability)
@@ -414,6 +432,10 @@ func (c *clientConn) handleQuery(query string) error {
 	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
 	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+	// Track metadata for SHOW TQDB STATUS
+	c.lastQueryBackend = "primary"
+	c.lastQueryCacheHit = false
 
 	// Build result set
 	result, err := c.buildResultSet(rows)
@@ -550,6 +572,10 @@ func (c *clientConn) readPacket() ([]byte, error) {
 }
 
 func (c *clientConn) writeOK() error {
+	return c.writeOKWithInfo("")
+}
+
+func (c *clientConn) writeOKWithInfo(info string) error {
 	c.sequence++
 	packet := WriteOKPacket(0, 0, c.status, c.capability)
 	packet[3] = c.sequence
@@ -591,4 +617,99 @@ func queryTypeLabel(t parser.QueryType) string {
 	default:
 		return "unknown"
 	}
+}
+
+func (c *clientConn) handleShowTQDBStatus() error {
+	// Build a simple result set following kingshard's approach
+	var result []byte
+
+	// Prepare data
+	backend := c.lastQueryBackend
+	if backend == "" {
+		backend = "none"
+	}
+	cacheHit := "0"
+	if c.lastQueryCacheHit {
+		cacheHit = "1"
+	}
+
+	// Column count packet (2 columns)
+	c.sequence++
+	packet := make([]byte, 4)
+	packet = append(packet, PutLengthEncodedInt(2)...)
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
+	packet[3] = c.sequence
+	result = append(result, packet...)
+
+	// Column 1: Variable_name (use kingshard's Field.Dump() pattern)
+	c.sequence++
+	packet = make([]byte, 4)
+	packet = append(packet, PutLengthEncodedString([]byte("def"))...)           // catalog
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // schema
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // table
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // org_table
+	packet = append(packet, PutLengthEncodedString([]byte("Variable_name"))...) // name
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // org_name
+	packet = append(packet, 0x0c)                                               // filler
+	packet = append(packet, 0x21, 0x00)                                         // charset (utf8)
+	packet = append(packet, 0x00, 0x01, 0x00, 0x00)                             // column length (256)
+	packet = append(packet, 0xfd)                                               // type (VAR_STRING)
+	packet = append(packet, 0x00, 0x00)                                         // flags
+	packet = append(packet, 0x00)                                               // decimals
+	packet = append(packet, 0x00, 0x00)                                         // filler
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
+	packet[3] = c.sequence
+	result = append(result, packet...)
+
+	// Column 2: Value
+	c.sequence++
+	packet = make([]byte, 4)
+	packet = append(packet, PutLengthEncodedString([]byte("def"))...)   // catalog
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // schema
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // table
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // org_table
+	packet = append(packet, PutLengthEncodedString([]byte("Value"))...) // name
+	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // org_name
+	packet = append(packet, 0x0c)                                       // filler
+	packet = append(packet, 0x21, 0x00)                                 // charset (utf8)
+	packet = append(packet, 0x00, 0x01, 0x00, 0x00)                     // column length (256)
+	packet = append(packet, 0xfd)                                       // type (VAR_STRING)
+	packet = append(packet, 0x00, 0x00)                                 // flags
+	packet = append(packet, 0x00)                                       // decimals
+	packet = append(packet, 0x00, 0x00)                                 // filler
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
+	packet[3] = c.sequence
+	result = append(result, packet...)
+
+	// EOF after columns
+	c.sequence++
+	eofPacket := WriteEOFPacket(c.status, c.capability)
+	eofPacket[3] = c.sequence
+	result = append(result, eofPacket...)
+
+	// Row 1: Backend
+	c.sequence++
+	packet = make([]byte, 4)
+	packet = append(packet, PutLengthEncodedString([]byte("Backend"))...)
+	packet = append(packet, PutLengthEncodedString([]byte(backend))...)
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
+	packet[3] = c.sequence
+	result = append(result, packet...)
+
+	// Row 2: Cache_hit
+	c.sequence++
+	packet = make([]byte, 4)
+	packet = append(packet, PutLengthEncodedString([]byte("Cache_hit"))...)
+	packet = append(packet, PutLengthEncodedString([]byte(cacheHit))...)
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
+	packet[3] = c.sequence
+	result = append(result, packet...)
+
+	// EOF after rows
+	c.sequence++
+	eofPacket = WriteEOFPacket(c.status, c.capability)
+	eofPacket[3] = c.sequence
+	result = append(result, eofPacket...)
+
+	return c.writeRaw(result)
 }

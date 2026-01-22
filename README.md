@@ -62,6 +62,33 @@ All query types supported:
 - UPDATE queries (returns affected rows)
 - DELETE queries (returns affected rows)
 
+## Query Status Inspection
+
+Use the `SHOW TQDB STATUS` command to see which backend served the last query:
+
+```sql
+mysql> SELECT * FROM users WHERE id = 1;
+mysql> SHOW TQDB STATUS;
++---------------+---------+
+| Variable_name | Value   |
++---------------+---------+
+| Backend       | primary |
+| Cache_hit     | 0       |
++---------------+---------+
+
+mysql> /* ttl:60 */ SELECT * FROM users WHERE id = 1;  -- Cache miss
+mysql> /* ttl:60 */ SELECT * FROM users WHERE id = 1;  -- Cache hit
+mysql> SHOW TQDB STATUS;
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| Backend       | cache |
+| Cache_hit     | 1     |
++---------------+-------+
+```
+
+This is useful for debugging cache behavior during development.
+
 ## Metrics
 
 Access Prometheus metrics at `http://localhost:9090/metrics`:
