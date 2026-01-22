@@ -29,21 +29,7 @@ Add caller metadata to your queries for better observability:
 /* ttl:60 file:app.php line:42 */ SELECT * FROM users WHERE active = 1
 ```
 
-### Important: MySQL CLI Requires `--comments` Flag
-
-When testing with the MySQL CLI, you **must** use the `--comments` flag to preserve metadata comments:
-
-```bash
-# Interactive mode with metadata support
-mysql -u php-crud-api -p -P 3307 php-crud-api --comments
-
-# Batch mode with metadata
-mysql -u user -P 3307 database --comments -e "/* ttl:60 file:test.php line:1 */ SELECT * FROM table"
-```
-
-**Why?** The MySQL CLI strips comments by default before sending queries to the server. The `--comments` flag preserves them.
-
-**Note:** Application code (PHP, Go, Python, etc.) sends comments by default - the `--comments` flag is only needed for the MySQL CLI.
+NB: When using the MySQL CLI, you **must** use the `--comments` flag to preserve metadata comments
 
 ## Transaction Support
 
