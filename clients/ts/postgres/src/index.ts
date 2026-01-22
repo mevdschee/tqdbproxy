@@ -74,7 +74,7 @@ export class Database {
     }
 
     /**
-     * Execute a standard query (pass-through to pg)
+     * Execute a standard query with caller metadata
      * 
      * @param text SQL query
      * @param values Query parameters
@@ -84,7 +84,11 @@ export class Database {
         text: string,
         values?: any[]
     ): Promise<QueryResult<R>> {
-        return this.client.query<R>(text, values);
+        const caller = this.getCaller();
+        const hint = `/* file:${caller.file} line:${caller.line} */`;
+        const hintedQuery = `${hint} ${text}`;
+
+        return this.client.query<R>(hintedQuery, values);
     }
 
     /**

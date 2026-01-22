@@ -74,7 +74,7 @@ export class Database {
     }
 
     /**
-     * Execute a standard query (pass-through to mysql2)
+     * Execute a standard query with caller metadata
      * 
      * @param sql SQL query
      * @param values Query parameters
@@ -84,11 +84,15 @@ export class Database {
         sql: string,
         values?: any
     ): Promise<[T, FieldPacket[]]> {
-        return this.connection.query<T>(sql, values);
+        const caller = this.getCaller();
+        const hint = `/* file:${caller.file} line:${caller.line} */`;
+        const hintedQuery = `${hint} ${sql}`;
+
+        return this.connection.query<T>(hintedQuery, values);
     }
 
     /**
-     * Execute a prepared statement (pass-through to mysql2)
+     * Execute a prepared statement with caller metadata
      * 
      * @param sql SQL query
      * @param values Query parameters
@@ -98,7 +102,11 @@ export class Database {
         sql: string,
         values?: any
     ): Promise<[T, FieldPacket[]]> {
-        return this.connection.execute<T>(sql, values);
+        const caller = this.getCaller();
+        const hint = `/* file:${caller.file} line:${caller.line} */`;
+        const hintedQuery = `${hint} ${sql}`;
+
+        return this.connection.execute<T>(hintedQuery, values);
     }
 
     /**
