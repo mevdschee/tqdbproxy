@@ -6,7 +6,7 @@ TQDBProxy is a unified data layer that sits between applications and their datab
 
 ## Core Value Proposition
 
-Instead of every service managing its own caching, metrics, and query instrumentation, a dedicated proxy handles these concerns centrally.
+Instead of every service managing its own caching, metrics, and query instrumentation, a dedicated Go written proxy handles these concerns centrally.
 
 ## Key Features
 
@@ -34,10 +34,9 @@ Instead of every service managing its own caching, metrics, and query instrument
   - Query (without params)
   - Total query latency
   - Cache hit/miss ratio
+  - Primary (vs. replica) ratio
   - Total queries
   - Cache queries
-  - Database queries (primary)
-  - Database queries (replica)
 - Prometheus-compatible metrics endpoint
 - Deep visibility into database behavior without modifying application logic
 
