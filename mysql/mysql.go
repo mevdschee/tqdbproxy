@@ -6,10 +6,12 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/mevdschee/tqdbproxy/cache"
+	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
 )
 
@@ -18,6 +20,21 @@ const (
 	comStmtPrepare = 0x16
 	comStmtExecute = 0x17
 )
+
+func queryTypeLabel(t parser.QueryType) string {
+	switch t {
+	case parser.QuerySelect:
+		return "select"
+	case parser.QueryInsert:
+		return "insert"
+	case parser.QueryUpdate:
+		return "update"
+	case parser.QueryDelete:
+		return "delete"
+	default:
+		return "unknown"
+	}
+}
 
 // Proxy handles MySQL protocol connections with caching
 type Proxy struct {
@@ -151,17 +168,32 @@ func (p *Proxy) handleCommands(client, backend net.Conn, stmts map[uint32]*parse
 }
 
 func (p *Proxy) handleQuery(packet []byte, client, backend net.Conn) {
+	start := time.Now()
 	query := string(packet[5:])
 	parsed := parser.Parse(query)
+
+	file := parsed.File
+	if file == "" {
+		file = "unknown"
+	}
+	line := "0"
+	if parsed.Line > 0 {
+		line = strconv.Itoa(parsed.Line)
+	}
+	queryType := queryTypeLabel(parsed.Type)
 
 	// Check cache for cacheable queries
 	if parsed.IsCacheable() {
 		if cached, ok := p.cache.Get(parsed.Query); ok {
+			metrics.CacheHits.WithLabelValues(file, line).Inc()
+			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
+			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 			if err := p.writeRaw(client, cached); err != nil {
 				log.Printf("[MySQL] Cache response error: %v", err)
 			}
 			return
 		}
+		metrics.CacheMisses.WithLabelValues(file, line).Inc()
 	}
 
 	// Forward to backend and capture response
@@ -175,6 +207,10 @@ func (p *Proxy) handleQuery(packet []byte, client, backend net.Conn) {
 		log.Printf("[MySQL] Backend read error: %v", err)
 		return
 	}
+
+	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
+	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
+	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
 	// Cache the response if cacheable
 	if parsed.IsCacheable() {

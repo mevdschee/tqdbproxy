@@ -3,24 +3,39 @@ package main
 import (
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/mevdschee/tqdbproxy/cache"
 	"github.com/mevdschee/tqdbproxy/config"
+	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/mysql"
 	"github.com/mevdschee/tqdbproxy/proxy"
 )
 
 func main() {
 	configPath := flag.String("config", "config.ini", "Path to configuration file")
+	metricsAddr := flag.String("metrics", ":9090", "Metrics endpoint address")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	// Initialize metrics
+	metrics.Init()
+
+	// Start metrics HTTP server
+	go func() {
+		http.Handle("/metrics", metrics.Handler())
+		log.Printf("Metrics endpoint at http://localhost%s/metrics", *metricsAddr)
+		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
+			log.Printf("Metrics server error: %v", err)
+		}
+	}()
 
 	// Initialize cache (10000 entries max)
 	queryCache, err := cache.New(10000)
