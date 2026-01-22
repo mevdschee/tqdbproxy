@@ -15,4 +15,4 @@ The `mysql` component implements the MySQL wire protocol, allowing TQDBProxy to 
 
 The MySQL component records detailed metrics for every query, including latency and cache status, labeled with source file and line number information extracted from SQL hints.
 
-[Back to Components](../README.md)
+[Back to Index](../../README.md)

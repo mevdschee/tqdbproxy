@@ -12,4 +12,4 @@ While protocol-specific proxies (like MySQL) implement deep packet inspection an
 
 It uses `io.Copy` in separate goroutines to bidirectionally pipe data between the client connection and the backend connection, ensuring efficient asynchronous I/O.
 
-[Back to Components](../README.md)
+[Back to Index](../../README.md)

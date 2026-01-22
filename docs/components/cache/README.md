@@ -15,4 +15,4 @@ The `cache` component provides an in-memory caching layer for query results.
 - `Set(key string, value []byte, ttl time.Duration)`: Stores a result with a specific TTL.
 - `Delete(key string)`: Manually removes an entry from the cache.
 
-[Back to Components](../README.md)
+[Back to Index](../../README.md)

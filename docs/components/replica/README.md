@@ -14,4 +14,4 @@ The `replica` component manages pools of database connections, specifically hand
 - **Primary**: All write operations (INSERT, UPDATE, DELETE) and non-cacheable SELECTs.
 - **Replicas**: Cacheable SELECT queries (those with a `ttl > 0` hint) can be routed to replicas to reduce primary load.
 
-[Back to Components](../README.md)
+[Back to Index](../../README.md)

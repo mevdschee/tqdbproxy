@@ -15,4 +15,4 @@ The `parser` component is a lightweight SQL analyzer used to extract metadata an
 
 The parser uses optimized regular expressions to extract information without the overhead of a full SQL grammar parser, ensuring minimal latency in the proxy hot path.
 
-[Back to Components](../README.md)
+[Back to Index](../../README.md)

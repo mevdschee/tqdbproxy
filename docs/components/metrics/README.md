@@ -20,4 +20,4 @@ The `metrics` component is responsible for collecting and exposing Prometheus-co
 - `tqdbproxy_database_queries_total`: Total queries sent to the backend database.
   - Labels: `replica`.
 
-[Back to Components](../README.md)
+[Back to Index](../../README.md)
