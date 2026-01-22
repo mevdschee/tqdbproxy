@@ -72,5 +72,6 @@ TQDBProxy is composed of several modular components:
 Currently, TQDBProxy provides client libraries for:
 - **[Go](clients/README.md)**
 - **[PHP](clients/README.md)**
+- **[TypeScript](clients/README.md)**
 
 See the [Clients Documentation](clients/README.md) for usage instructions.
