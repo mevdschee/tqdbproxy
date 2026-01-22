@@ -77,4 +77,42 @@ func TestQueryWithTTL(t *testing.T) {
 	if !strings.Contains(mock.lastQuery, query) {
 		t.Errorf("Original query not found.\nGot: %q", mock.lastQuery)
 	}
+
+	// Verify line number is present
+	if !strings.Contains(mock.lastQuery, "line:") {
+		t.Errorf("Line number not found in query.\nGot: %q", mock.lastQuery)
+	}
+}
+
+func TestQueryRowWithTTL(t *testing.T) {
+	mock := &MockDriver{}
+	sql.Register("tqdbproxy-mock-row", mock)
+
+	// Open using our mock driver
+	db, err := Open("tqdbproxy-mock-row", "dsn")
+	if err != nil {
+		t.Fatalf("Failed to open db: %v", err)
+	}
+
+	ctx := context.Background()
+	ttl := 120
+	query := "SELECT name FROM users WHERE id = ?"
+
+	// Call QueryRowWithTTL
+	_ = db.QueryRowWithTTL(ctx, ttl, query, 1)
+
+	// Check if query was modified correctly
+	expectedHint := "/* ttl:120 file:client_test.go"
+	if !strings.Contains(mock.lastQuery, expectedHint) {
+		t.Errorf("Query not properly decorated.\nGot: %q\nExpected to contain: %q", mock.lastQuery, expectedHint)
+	}
+
+	if !strings.Contains(mock.lastQuery, query) {
+		t.Errorf("Original query not found.\nGot: %q", mock.lastQuery)
+	}
+
+	// Verify line number is present
+	if !strings.Contains(mock.lastQuery, "line:") {
+		t.Errorf("Line number not found in query.\nGot: %q", mock.lastQuery)
+	}
 }

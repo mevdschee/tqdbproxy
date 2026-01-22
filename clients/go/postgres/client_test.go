@@ -77,6 +77,11 @@ func TestQueryWithTTL(t *testing.T) {
 	if !strings.Contains(mock.lastQuery, query) {
 		t.Errorf("Original query not found.\nGot: %q", mock.lastQuery)
 	}
+
+	// Verify line number is present
+	if !strings.Contains(mock.lastQuery, "line:") {
+		t.Errorf("Line number not found in query.\nGot: %q", mock.lastQuery)
+	}
 }
 
 func TestQueryRowWithTTL(t *testing.T) {
@@ -91,7 +96,7 @@ func TestQueryRowWithTTL(t *testing.T) {
 
 	ctx := context.Background()
 	ttl := 120
-	query := "SELECT id, name FROM users WHERE id = $1"
+	query := "SELECT name FROM users WHERE id = $1"
 
 	// Call QueryRowWithTTL
 	_ = db.QueryRowWithTTL(ctx, ttl, query, 1)
@@ -104,5 +109,10 @@ func TestQueryRowWithTTL(t *testing.T) {
 
 	if !strings.Contains(mock.lastQuery, query) {
 		t.Errorf("Original query not found.\nGot: %q", mock.lastQuery)
+	}
+
+	// Verify line number is present
+	if !strings.Contains(mock.lastQuery, "line:") {
+		t.Errorf("Line number not found in query.\nGot: %q", mock.lastQuery)
 	}
 }

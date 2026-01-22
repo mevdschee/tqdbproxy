@@ -93,4 +93,81 @@ class DatabaseTest extends TestCase
 
         $this->assertCount(2, $results);
     }
+
+    public function testQueryInjectsCallerMetadata(): void
+    {
+        // Create a mock PDO to capture the actual query
+        $mockPdo = $this->createMock(PDO::class);
+        $mockStmt = $this->createMock(\PDOStatement::class);
+
+        $capturedQuery = null;
+        $mockPdo->expects($this->once())
+            ->method('query')
+            ->willReturnCallback(function ($query) use ($mockStmt, &$capturedQuery) {
+                $capturedQuery = $query;
+                return $mockStmt;
+            });
+
+        $db = Database::wrap($mockPdo);
+        $db->query('SELECT * FROM users');
+
+        // Verify the query contains caller metadata
+        $this->assertStringContainsString('/* file:', $capturedQuery);
+        $this->assertStringContainsString('line:', $capturedQuery);
+        $this->assertStringContainsString('DatabaseTest.php', $capturedQuery);
+        $this->assertStringContainsString('SELECT * FROM users', $capturedQuery);
+    }
+
+    public function testPrepareInjectsCallerMetadata(): void
+    {
+        // Create a mock PDO to capture the actual query
+        $mockPdo = $this->createMock(PDO::class);
+        $mockStmt = $this->createMock(\PDOStatement::class);
+
+        $capturedQuery = null;
+        $mockPdo->expects($this->once())
+            ->method('prepare')
+            ->willReturnCallback(function ($query) use ($mockStmt, &$capturedQuery) {
+                $capturedQuery = $query;
+                return $mockStmt;
+            });
+
+        $db = Database::wrap($mockPdo);
+        $db->prepare('SELECT * FROM users WHERE id = $1');
+
+        // Verify the query contains caller metadata
+        $this->assertStringContainsString('/* file:', $capturedQuery);
+        $this->assertStringContainsString('line:', $capturedQuery);
+        $this->assertStringContainsString('DatabaseTest.php', $capturedQuery);
+        $this->assertStringContainsString('SELECT * FROM users WHERE id = $1', $capturedQuery);
+    }
+
+    public function testQueryWithTTLInjectsFullMetadata(): void
+    {
+        // Create a mock PDO to capture the actual query
+        $mockPdo = $this->createMock(PDO::class);
+        $mockStmt = $this->createMock(\PDOStatement::class);
+
+        $capturedQuery = null;
+        $mockPdo->expects($this->once())
+            ->method('prepare')
+            ->willReturnCallback(function ($query) use ($mockStmt, &$capturedQuery) {
+                $capturedQuery = $query;
+                return $mockStmt;
+            });
+
+        $mockStmt->expects($this->once())
+            ->method('execute')
+            ->willReturn(true);
+
+        $db = Database::wrap($mockPdo);
+        $db->queryWithTTL(60, 'SELECT * FROM users', []);
+
+        // Verify the query contains TTL and caller metadata
+        $this->assertStringContainsString('/* ttl:60', $capturedQuery);
+        $this->assertStringContainsString('file:', $capturedQuery);
+        $this->assertStringContainsString('line:', $capturedQuery);
+        $this->assertStringContainsString('DatabaseTest.php', $capturedQuery);
+        $this->assertStringContainsString('SELECT * FROM users', $capturedQuery);
+    }
 }
