@@ -59,7 +59,7 @@ class Database
      * Execute a query with cache TTL hint
      * 
      * Automatically captures the caller's file and line number and injects
-     * a SQL comment hint: /* ttl:X file:Y line:Z */
+     * a SQL comment hint: ttl:X file:Y line:Z
      * 
      * @param int $ttl Cache TTL in seconds
      * @param string $query SQL query
@@ -119,7 +119,7 @@ class Database
         $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 3);
         // Skip: [0] = getCaller, [1] = queryWithTTL, [2] = actual caller
         $caller = $trace[2] ?? ['file' => 'unknown', 'line' => 0];
-        
+
         return [
             'file' => basename($caller['file'] ?? 'unknown'),
             'line' => $caller['line'] ?? 0
