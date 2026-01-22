@@ -149,7 +149,7 @@ func (c *clientConn) handshake() error {
 		return err
 	}
 
-	c.sequence = 0
+	// Don't reset here - let run() reset when it reads the next command
 	return nil
 }
 
@@ -382,6 +382,28 @@ func (c *clientConn) handleQuery(query string) error {
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
 	}
 
+	// For non-SELECT queries (INSERT, UPDATE, DELETE), use Exec instead of Query
+	if parsed.Type != parser.QuerySelect {
+		result, err := c.backendDB.Exec(parsed.Query)
+		if err != nil {
+			return err
+		}
+
+		affectedRows, _ := result.RowsAffected()
+		lastInsertId, _ := result.LastInsertId()
+
+		metrics.DatabaseQueries.WithLabelValues("primary").Inc()
+		metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
+		metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+		// Send OK packet with affected rows
+		c.sequence++
+		okPacket := WriteOKPacket(uint64(affectedRows), uint64(lastInsertId), c.status, c.capability)
+		okPacket[3] = c.sequence
+		_, err = c.conn.Write(okPacket)
+		return err
+	}
+
 	// Execute query on backend (use cleaned query without metadata)
 	rows, err := c.backendDB.Query(parsed.Query)
 	if err != nil {
@@ -429,8 +451,8 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 	packet := make([]byte, 4)
 	packet = append(packet, PutLengthEncodedInt(uint64(colCount))...)
 	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
 	c.sequence++
+	packet[3] = c.sequence
 	result = append(result, packet...)
 
 	// Column definition packets (simplified - just send column names)
@@ -452,15 +474,15 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 		packet = append(packet, 0x00, 0x00)             // filler
 
 		binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-		packet[3] = c.sequence
 		c.sequence++
+		packet[3] = c.sequence
 		result = append(result, packet...)
 	}
 
 	// EOF packet after columns
+	c.sequence++
 	eofPacket := WriteEOFPacket(c.status, c.capability)
 	eofPacket[3] = c.sequence
-	c.sequence++
 	result = append(result, eofPacket...)
 
 	// Row data packets
@@ -494,15 +516,15 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 		}
 
 		binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-		packet[3] = c.sequence
 		c.sequence++
+		packet[3] = c.sequence
 		result = append(result, packet...)
 	}
 
 	// EOF packet after rows
+	c.sequence++
 	eofPacket = WriteEOFPacket(c.status, c.capability)
 	eofPacket[3] = c.sequence
-	c.sequence++
 	result = append(result, eofPacket...)
 
 	return result, nil
@@ -515,7 +537,9 @@ func (c *clientConn) readPacket() ([]byte, error) {
 	}
 
 	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
-	c.sequence = header[3]
+	// Read the client's sequence number and use it as base for our response
+	clientSeq := header[3]
+	c.sequence = clientSeq
 
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(c.conn, payload); err != nil {
@@ -526,25 +550,25 @@ func (c *clientConn) readPacket() ([]byte, error) {
 }
 
 func (c *clientConn) writeOK() error {
+	c.sequence++
 	packet := WriteOKPacket(0, 0, c.status, c.capability)
 	packet[3] = c.sequence
-	c.sequence++
 	_, err := c.conn.Write(packet)
 	return err
 }
 
 func (c *clientConn) writeError(e error) error {
+	c.sequence++
 	packet := WriteErrorPacket(1105, "HY000", e.Error(), c.capability)
 	packet[3] = c.sequence
-	c.sequence++
 	_, err := c.conn.Write(packet)
 	return err
 }
 
 func (c *clientConn) writeEOF() error {
+	c.sequence++
 	packet := WriteEOFPacket(c.status, c.capability)
 	packet[3] = c.sequence
-	c.sequence++
 	_, err := c.conn.Write(packet)
 	return err
 }
