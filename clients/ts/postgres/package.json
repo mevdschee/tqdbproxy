@@ -1,0 +1,36 @@
+{
+    "name": "@tqdbproxy/postgres",
+    "version": "1.0.0",
+    "description": "PostgreSQL client for TQDBProxy with TTL-aware caching",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "test": "jest",
+        "prepublishOnly": "npm run build"
+    },
+    "keywords": [
+        "postgresql",
+        "postgres",
+        "pg",
+        "cache",
+        "proxy",
+        "tqdbproxy"
+    ],
+    "author": "Maurits van der Schee <maurits@vdschee.nl>",
+    "license": "MIT",
+    "peerDependencies": {
+        "pg": "^8.0.0"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.0.0",
+        "@types/node": "^20.0.0",
+        "@types/pg": "^8.0.0",
+        "jest": "^29.0.0",
+        "ts-jest": "^29.0.0",
+        "typescript": "^5.0.0"
+    },
+    "files": [
+        "dist"
+    ]
+}
