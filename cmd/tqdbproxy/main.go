@@ -14,7 +14,7 @@ import (
 	"github.com/mevdschee/tqdbproxy/config"
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/mysql"
-	"github.com/mevdschee/tqdbproxy/proxy"
+	"github.com/mevdschee/tqdbproxy/postgres"
 	"github.com/mevdschee/tqdbproxy/replica"
 )
 
@@ -61,8 +61,12 @@ func main() {
 		log.Fatalf("Failed to start MySQL proxy: %v", err)
 	}
 
-	// Start PostgreSQL proxy (transparent for now)
-	pgProxy := proxy.New("PostgreSQL", cfg.Postgres.Listen, cfg.Postgres.Primary)
+	// Create PostgreSQL replica pool
+	pgPool := replica.NewPool(cfg.Postgres.Primary, cfg.Postgres.Replicas)
+	log.Printf("[PostgreSQL] Primary: %s, Replicas: %v", cfg.Postgres.Primary, cfg.Postgres.Replicas)
+
+	// Start PostgreSQL proxy with replica pool and caching
+	pgProxy := postgres.New(cfg.Postgres.Listen, pgPool, queryCache)
 	if err := pgProxy.Start(); err != nil {
 		log.Fatalf("Failed to start PostgreSQL proxy: %v", err)
 	}
