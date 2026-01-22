@@ -93,3 +93,20 @@ func TestParsedQuery_IsCacheable(t *testing.T) {
 		})
 	}
 }
+
+func TestCacheKey_DifferentParams(t *testing.T) {
+	// Cache key is Query field - same query with different params should differ
+	q1 := Parse("/* ttl:60 */ SELECT * FROM users WHERE id = 1")
+	q2 := Parse("/* ttl:60 */ SELECT * FROM users WHERE id = 2")
+
+	// Using Query as cache key means different params = different keys
+	if q1.Query == q2.Query {
+		t.Errorf("Queries with different parameters should have different cache keys")
+	}
+
+	// Identical queries should have same cache key
+	q3 := Parse("/* ttl:60 */ SELECT * FROM users WHERE id = 1")
+	if q1.Query != q3.Query {
+		t.Errorf("Identical queries should have same cache key")
+	}
+}
