@@ -8,8 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Configuration - set your MySQL credentials here
-MYSQL_USER="${MYSQL_USER:-php-crud-api}"
-MYSQL_PASS="${MYSQL_PASS:-php-crud-api}"
+MYSQL_USER="${MYSQL_USER:-tqdbproxy}"
+MYSQL_PASS="${MYSQL_PASS:-tqdbproxy}"
 CONNECTIONS="${CONNECTIONS:-100}"
 DURATION="${DURATION:-3}"
 
