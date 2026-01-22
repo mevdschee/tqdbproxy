@@ -40,7 +40,6 @@ func queryTypeLabel(t parser.QueryType) string {
 // Proxy handles MySQL protocol connections with caching
 type Proxy struct {
 	listen      string
-	backend     string // Deprecated: for backward compatibility
 	replicaPool *replica.Pool
 	cache       *cache.Cache
 }
@@ -49,7 +48,6 @@ type Proxy struct {
 func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
 		listen:      listen,
-		backend:     pool.GetPrimary(), // For backward compatibility
 		replicaPool: pool,
 		cache:       c,
 	}
@@ -61,7 +59,7 @@ func (p *Proxy) Start() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("[MySQL] Listening on %s, forwarding to %s", p.listen, p.backend)
+	log.Printf("[MySQL] Listening on %s, forwarding to %s", p.listen, p.replicaPool.GetPrimary())
 
 	go func() {
 		for {
@@ -80,15 +78,15 @@ func (p *Proxy) Start() error {
 func (p *Proxy) handleConnection(client net.Conn) {
 	defer client.Close()
 
-	backend, err := net.Dial("tcp", p.backend)
+	primary, err := net.Dial("tcp", p.replicaPool.GetPrimary())
 	if err != nil {
-		log.Printf("[MySQL] Backend connection error: %v", err)
+		log.Printf("[MySQL] Primary connection error: %v", err)
 		return
 	}
-	defer backend.Close()
+	defer primary.Close()
 
 	// Phase 1: Handshake - pass through until authenticated
-	if err := p.handleHandshake(client, backend); err != nil {
+	if err := p.handleHandshake(client, primary); err != nil {
 		log.Printf("[MySQL] Handshake error: %v", err)
 		return
 	}
@@ -97,12 +95,12 @@ func (p *Proxy) handleConnection(client net.Conn) {
 	stmts := make(map[uint32]*parser.ParsedQuery)
 
 	// Phase 2: Command phase - intercept queries
-	p.handleCommands(client, backend, stmts)
+	p.handleCommands(client, primary, stmts)
 }
 
-func (p *Proxy) handleHandshake(client, backend net.Conn) error {
+func (p *Proxy) handleHandshake(client, primary net.Conn) error {
 	// Forward server greeting to client
-	greeting, err := p.readPacket(backend)
+	greeting, err := p.readPacket(primary)
 	if err != nil {
 		return err
 	}
@@ -115,13 +113,13 @@ func (p *Proxy) handleHandshake(client, backend net.Conn) error {
 	if err != nil {
 		return err
 	}
-	if err := p.writePacket(backend, authResp); err != nil {
+	if err := p.writePacket(primary, authResp); err != nil {
 		return err
 	}
 
 	// Forward server auth result to client (may be multi-packet)
 	for {
-		result, err := p.readPacket(backend)
+		result, err := p.readPacket(primary)
 		if err != nil {
 			return err
 		}
@@ -137,7 +135,7 @@ func (p *Proxy) handleHandshake(client, backend net.Conn) error {
 	return nil
 }
 
-func (p *Proxy) handleCommands(client, backend net.Conn, stmts map[uint32]*parser.ParsedQuery) {
+func (p *Proxy) handleCommands(client, primary net.Conn, stmts map[uint32]*parser.ParsedQuery) {
 	for {
 		packet, err := p.readPacket(client)
 		if err != nil {
@@ -148,7 +146,7 @@ func (p *Proxy) handleCommands(client, backend net.Conn, stmts map[uint32]*parse
 		}
 
 		if len(packet) < 5 {
-			p.forwardPacketAndResponse(packet, client, backend)
+			p.forwardPacketAndResponse(packet, client, primary)
 			continue
 		}
 
@@ -156,21 +154,21 @@ func (p *Proxy) handleCommands(client, backend net.Conn, stmts map[uint32]*parse
 
 		switch cmdType {
 		case comQuery:
-			p.handleQuery(packet, client, backend)
+			p.handleQuery(packet, client, primary)
 
 		case comStmtPrepare:
-			p.handlePrepare(packet, client, backend, stmts)
+			p.handlePrepare(packet, client, primary, stmts)
 
 		case comStmtExecute:
-			p.handleExecute(packet, client, backend, stmts)
+			p.handleExecute(packet, client, primary, stmts)
 
 		default:
-			p.forwardPacketAndResponse(packet, client, backend)
+			p.forwardPacketAndResponse(packet, client, primary)
 		}
 	}
 }
 
-func (p *Proxy) handleQuery(packet []byte, client, backend net.Conn) {
+func (p *Proxy) handleQuery(packet []byte, client, primary net.Conn) {
 	start := time.Now()
 	query := string(packet[5:])
 	parsed := parser.Parse(query)
@@ -199,15 +197,15 @@ func (p *Proxy) handleQuery(packet []byte, client, backend net.Conn) {
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
 	}
 
-	// Forward to backend and capture response
-	if err := p.writePacket(backend, packet); err != nil {
-		log.Printf("[MySQL] Backend write error: %v", err)
+	// Forward to primary and capture response
+	if err := p.writePacket(primary, packet); err != nil {
+		log.Printf("[MySQL] Primary write error: %v", err)
 		return
 	}
 
-	response, err := p.readFullResponse(backend)
+	response, err := p.readFullResponse(primary)
 	if err != nil {
-		log.Printf("[MySQL] Backend read error: %v", err)
+		log.Printf("[MySQL] Primary read error: %v", err)
 		return
 	}
 
@@ -225,19 +223,19 @@ func (p *Proxy) handleQuery(packet []byte, client, backend net.Conn) {
 	}
 }
 
-func (p *Proxy) handlePrepare(packet []byte, client, backend net.Conn, stmts map[uint32]*parser.ParsedQuery) {
+func (p *Proxy) handlePrepare(packet []byte, client, primary net.Conn, stmts map[uint32]*parser.ParsedQuery) {
 	query := string(packet[5:])
 	parsed := parser.Parse(query)
 
-	// Forward PREPARE to backend
-	if err := p.writePacket(backend, packet); err != nil {
-		log.Printf("[MySQL] Backend write error: %v", err)
+	// Forward PREPARE to primary
+	if err := p.writePacket(primary, packet); err != nil {
+		log.Printf("[MySQL] Primary write error: %v", err)
 		return
 	}
 
-	response, err := p.readPrepareResponse(backend)
+	response, err := p.readPrepareResponse(primary)
 	if err != nil {
-		log.Printf("[MySQL] Backend read error: %v", err)
+		log.Printf("[MySQL] Primary read error: %v", err)
 		return
 	}
 
@@ -252,9 +250,9 @@ func (p *Proxy) handlePrepare(packet []byte, client, backend net.Conn, stmts map
 	}
 }
 
-func (p *Proxy) handleExecute(packet []byte, client, backend net.Conn, stmts map[uint32]*parser.ParsedQuery) {
+func (p *Proxy) handleExecute(packet []byte, client, primary net.Conn, stmts map[uint32]*parser.ParsedQuery) {
 	if len(packet) < 9 {
-		p.forwardPacketAndResponse(packet, client, backend)
+		p.forwardPacketAndResponse(packet, client, primary)
 		return
 	}
 
@@ -275,15 +273,15 @@ func (p *Proxy) handleExecute(packet []byte, client, backend net.Conn, stmts map
 		}
 	}
 
-	// Forward to backend
-	if err := p.writePacket(backend, packet); err != nil {
-		log.Printf("[MySQL] Backend write error: %v", err)
+	// Forward to primary
+	if err := p.writePacket(primary, packet); err != nil {
+		log.Printf("[MySQL] Primary write error: %v", err)
 		return
 	}
 
-	response, err := p.readFullResponse(backend)
+	response, err := p.readFullResponse(primary)
 	if err != nil {
-		log.Printf("[MySQL] Backend read error: %v", err)
+		log.Printf("[MySQL] Primary read error: %v", err)
 		return
 	}
 
@@ -297,11 +295,11 @@ func (p *Proxy) handleExecute(packet []byte, client, backend net.Conn, stmts map
 	}
 }
 
-func (p *Proxy) forwardPacketAndResponse(packet []byte, client, backend net.Conn) {
-	if err := p.writePacket(backend, packet); err != nil {
+func (p *Proxy) forwardPacketAndResponse(packet []byte, client, primary net.Conn) {
+	if err := p.writePacket(primary, packet); err != nil {
 		return
 	}
-	response, err := p.readFullResponse(backend)
+	response, err := p.readFullResponse(primary)
 	if err != nil {
 		return
 	}

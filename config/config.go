@@ -16,7 +16,6 @@ type Config struct {
 // ProxyConfig holds configuration for a single protocol proxy
 type ProxyConfig struct {
 	Listen   string
-	Backend  string   // Deprecated: use Primary instead
 	Primary  string   // Primary database address
 	Replicas []string // Read replica addresses
 }
@@ -37,10 +36,6 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("TQDBPROXY_MYSQL_LISTEN"); v != "" {
 		config.MySQL.Listen = v
 	}
-	if v := os.Getenv("TQDBPROXY_MYSQL_BACKEND"); v != "" {
-		config.MySQL.Backend = v
-		config.MySQL.Primary = v // Also set primary for backward compatibility
-	}
 	if v := os.Getenv("TQDBPROXY_MYSQL_PRIMARY"); v != "" {
 		config.MySQL.Primary = v
 	}
@@ -49,10 +44,6 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("TQDBPROXY_POSTGRES_LISTEN"); v != "" {
 		config.Postgres.Listen = v
 	}
-	if v := os.Getenv("TQDBPROXY_POSTGRES_BACKEND"); v != "" {
-		config.Postgres.Backend = v
-		config.Postgres.Primary = v // Also set primary for backward compatibility
-	}
 	if v := os.Getenv("TQDBPROXY_POSTGRES_PRIMARY"); v != "" {
 		config.Postgres.Primary = v
 	}
@@ -60,17 +51,11 @@ func Load(path string) (*Config, error) {
 	return config, nil
 }
 
-func loadProxyConfig(cfg *ini.File, section, defaultListen, defaultBackend string) ProxyConfig {
+func loadProxyConfig(cfg *ini.File, section, defaultListen, defaultPrimary string) ProxyConfig {
 	sec := cfg.Section(section)
 
 	listen := sec.Key("listen").MustString(defaultListen)
-	backend := sec.Key("backend").MustString(defaultBackend)
-	primary := sec.Key("primary").MustString("")
-
-	// Backward compatibility: if primary not set, use backend
-	if primary == "" {
-		primary = backend
-	}
+	primary := sec.Key("primary").MustString(defaultPrimary)
 
 	// Parse replicas (replica1, replica2, etc.)
 	var replicas []string
@@ -84,7 +69,6 @@ func loadProxyConfig(cfg *ini.File, section, defaultListen, defaultBackend strin
 
 	return ProxyConfig{
 		Listen:   listen,
-		Backend:  backend,
 		Primary:  primary,
 		Replicas: replicas,
 	}
