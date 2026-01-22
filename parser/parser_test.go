@@ -58,6 +58,10 @@ func TestParse_FileLineHints(t *testing.T) {
 		{"/* file:user.go line:42 */ SELECT * FROM users", "user.go", 42},
 		{"/* ttl:60 file:api.go line:100 */ SELECT * FROM users", "api.go", 100},
 		{"SELECT * FROM users", "", 0},
+		// File paths with forward slashes
+		{"/* file:src/controllers/UserController.php line:123 */ SELECT * FROM users", "src/controllers/UserController.php", 123},
+		{"/* ttl:60 file:app/models/User.go line:55 */ SELECT * FROM users", "app/models/User.go", 55},
+		{"/* file:/var/www/html/index.php line:10 */ SELECT * FROM users", "/var/www/html/index.php", 10},
 	}
 
 	for _, tt := range tests {
