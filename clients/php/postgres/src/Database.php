@@ -78,14 +78,18 @@ class Database
     }
 
     /**
-     * Execute a standard query (pass-through to PDO)
+     * Execute a standard query with caller metadata
      * 
      * @param string $query SQL query
      * @return PDOStatement
      */
     public function query(string $query): PDOStatement
     {
-        return $this->pdo->query($query);
+        $caller = $this->getCaller();
+        $hint = sprintf('/* file:%s line:%d */', $caller['file'], $caller['line']);
+        $hintedQuery = $hint . ' ' . $query;
+
+        return $this->pdo->query($hintedQuery);
     }
 
     /**
@@ -99,14 +103,18 @@ class Database
     }
 
     /**
-     * Prepare a statement (pass-through to PDO)
+     * Prepare a statement with caller metadata
      * 
      * @param string $query SQL query
      * @return PDOStatement|false
      */
     public function prepare(string $query): PDOStatement|false
     {
-        return $this->pdo->prepare($query);
+        $caller = $this->getCaller();
+        $hint = sprintf('/* file:%s line:%d */', $caller['file'], $caller['line']);
+        $hintedQuery = $hint . ' ' . $query;
+
+        return $this->pdo->prepare($hintedQuery);
     }
 
     /**
@@ -116,9 +124,9 @@ class Database
      */
     private function getCaller(): array
     {
-        $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 3);
-        // Skip: [0] = getCaller, [1] = queryWithTTL, [2] = actual caller
-        $caller = $trace[2] ?? ['file' => 'unknown', 'line' => 0];
+        $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2);
+        // Skip: [0] = getCaller, [1] = actual caller (where queryWithTTL was called)
+        $caller = $trace[1] ?? ['file' => 'unknown', 'line' => 0];
 
         return [
             'file' => basename($caller['file'] ?? 'unknown'),
