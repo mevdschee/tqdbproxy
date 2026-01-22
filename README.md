@@ -1,6 +1,6 @@
 # tqdbproxy
 
-TQDBProxy acts as a dedicated proxy that handles caching, metrics, and query instrumentation centrally. It understands both MySQL and PostgreSQL wire protocols, intercepts queries, extracts cache-TTL hints, normalizes SQL, and serves results from a fast Otter cache or forwards to the underlying database.
+TQDBProxy acts as a dedicated proxy that handles caching, metrics, and query instrumentation centrally. It understands both MySQL and PostgreSQL wire protocols, intercepts queries, extracts cache-TTL hints, normalizes SQL, and serves results from a fast Otter cache or forwards to the underlying primary database or read replicas.
 
 ### Key Features
 - **Protocol Support**: Native understanding of MySQL and PostgreSQL (currently transparent) protocols.
