@@ -21,7 +21,7 @@ composer require mevdschee/tqdbproxy-mysql
 <?php
 require 'vendor/autoload.php';
 
-use TQDBProxy\MySQL\Database;
+use TQDBProxy\MariaDB\Database;
 use PDO;
 
 // Create a new connection through TQDBProxy
