@@ -343,9 +343,7 @@ func (c *clientConn) readClientAuth() error {
 }
 
 func (c *clientConn) run() {
-	log.Printf("[MariaDB] run() started for conn %d, waiting for client commands", c.connID)
 	for {
-		log.Printf("[MariaDB] run() waiting for packet from client (conn %d)", c.connID)
 		packet, err := c.readPacket()
 		if err != nil {
 			if err != io.EOF {
@@ -353,7 +351,6 @@ func (c *clientConn) run() {
 			}
 			return
 		}
-		log.Printf("[MariaDB] run() received packet (conn %d): cmd=0x%02x len=%d", c.connID, packet[0], len(packet))
 
 		if len(packet) < 1 {
 			continue
