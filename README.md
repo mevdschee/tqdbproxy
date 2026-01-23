@@ -109,6 +109,10 @@ curl http://localhost:9090/metrics | grep tqdbproxy_query_total
 
 Metrics include file and line labels when metadata comments are used.
 
+## Cluster Setup
+
+DNS round-robin load balancing can be used to distribute queries across multiple proxies.
+
 ## Documentation
 
 See [docs/README.md](docs/README.md) for more information.
