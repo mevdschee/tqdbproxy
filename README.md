@@ -9,7 +9,7 @@ A high-performance MariaDB and PostgreSQL proxy with caching, read replica, metr
 - **Metrics**: Prometheus metrics for cache hits/misses, query latency, and more
 - **Read Replica Support**: Automatic routing of SELECT queries to replicas
 - **Transaction Support**: Full BEGIN/COMMIT/ROLLBACK support
-- **Interactive Mode**: Full MariaDB client support without restrictions
+- **Interactive Mode**: Full interactive client support
 
 ## Performance
 
