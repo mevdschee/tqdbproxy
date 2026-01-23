@@ -73,7 +73,7 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 (2 rows)
 ```
 
-Values: `Backend` = `primary`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
+Values: `Backend` = `primary`, `replicaN`, `cache`, or `none` (no query yet); `Cache_hit` = `0` or `1`.
 
 This is useful for debugging cache behavior during development.
 
