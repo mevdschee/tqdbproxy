@@ -1,11 +1,11 @@
-# tqdbproxy-mysql
+# tqdbproxy-mariadb
 
-PHP MySQL client library for TQDBProxy with TTL-aware caching.
+PHP MariaDB client library for TQDBProxy with TTL-aware caching.
 
 ## Installation
 
 ```bash
-composer require mevdschee/tqdbproxy-mysql
+composer require mevdschee/tqdbproxy-mariadb
 ```
 
 ## Requirements
@@ -43,7 +43,7 @@ $user = $stmt->fetch(PDO::FETCH_ASSOC);
 ### Wrapping an Existing PDO Instance
 
 ```php
-use TQDBProxy\MySQL\Database;
+use TQDBProxy\MariaDB\Database;
 use PDO;
 
 // Create a standard PDO connection
@@ -144,7 +144,7 @@ The TQDBProxy server parses this hint and caches the query result for 60 seconds
 ## Testing
 
 ```bash
-cd clients/php/mysql
+cd clients/php/mariadb
 composer install
 vendor/bin/phpunit tests/
 ```
