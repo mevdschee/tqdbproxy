@@ -110,31 +110,6 @@ func TestReadStartupMessage(t *testing.T) {
 	}
 }
 
-func TestReadQueryResponse(t *testing.T) {
-	conn := newMockConn()
-	p := &Proxy{}
-
-	// Write a simple response: RowDescription, DataRow, CommandComplete, ReadyForQuery
-	// For simplicity, just write ReadyForQuery
-	conn.WriteByte('Z')                             // ReadyForQuery
-	binary.Write(conn, binary.BigEndian, uint32(5)) // Length
-	conn.WriteByte('I')                             // Transaction status: Idle
-
-	response, err := p.readQueryResponse(conn)
-	if err != nil {
-		t.Fatalf("readQueryResponse failed: %v", err)
-	}
-
-	// Verify response contains ReadyForQuery message
-	if len(response) < 6 {
-		t.Errorf("Response too short: %d bytes", len(response))
-	}
-
-	if response[0] != 'Z' {
-		t.Errorf("Expected ReadyForQuery ('Z'), got %c", response[0])
-	}
-}
-
 func TestQueryTypeLabel(t *testing.T) {
 	tests := []struct {
 		queryType parser.QueryType

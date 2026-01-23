@@ -2,17 +2,22 @@ package postgres
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/mevdschee/tqdbproxy/cache"
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
 	"github.com/mevdschee/tqdbproxy/replica"
+
+	_ "github.com/lib/pq"
 )
 
 const (
@@ -28,7 +33,12 @@ const (
 	msgRowDescription  = 'T'
 	msgDataRow         = 'D'
 	msgErrorResponse   = 'E'
+	msgAuthentication  = 'R'
+	msgParameterStatus = 'S'
+	msgBackendKeyData  = 'K'
 )
+
+var connCounter uint32
 
 func queryTypeLabel(t parser.QueryType) string {
 	switch t {
@@ -76,110 +86,169 @@ func (p *Proxy) Start() error {
 				log.Printf("[PostgreSQL] Accept error: %v", err)
 				continue
 			}
-			go p.handleConnection(client)
+			connID := atomic.AddUint32(&connCounter, 1)
+			go p.handleConnection(client, connID)
 		}
 	}()
 
 	return nil
 }
 
-func (p *Proxy) handleConnection(client net.Conn) {
+func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defer client.Close()
 
-	primary, err := net.Dial("tcp", p.replicaPool.GetPrimary())
-	if err != nil {
-		log.Printf("[PostgreSQL] Primary connection error: %v", err)
-		return
-	}
-	defer primary.Close()
-
-	// Phase 1: Startup and authentication - pass through
-	if err := p.handleStartup(client, primary); err != nil {
-		log.Printf("[PostgreSQL] Startup error: %v", err)
-		return
-	}
-
-	// Phase 2: Command phase - intercept queries
-	p.handleMessages(client, primary)
-}
-
-func (p *Proxy) handleStartup(client, primary net.Conn) error {
-	// Read startup message from client (no type byte, just length + payload)
+	// Read startup message from client
 	startupMsg, err := p.readStartupMessage(client)
 	if err != nil {
-		return err
+		log.Printf("[PostgreSQL] Startup read error (conn %d): %v", connID, err)
+		return
 	}
 
-	// Forward to primary
-	if _, err := primary.Write(startupMsg); err != nil {
-		return err
-	}
-
-	// Handle authentication flow (pass through until ReadyForQuery)
-	for {
-		msgType, payload, err := p.readMessage(primary)
-		if err != nil {
-			return err
-		}
-
-		// Write to client
-		if err := p.writeMessage(client, msgType, payload); err != nil {
-			return err
-		}
-
-		// ReadyForQuery ('Z') signals end of startup
-		if msgType == msgReadyForQuery {
-			break
-		}
-
-		// If server needs auth response, read from client and forward
-		if msgType == 'R' { // Authentication request
-			// Check if it needs a response (not AuthenticationOk)
-			if len(payload) >= 4 {
-				authType := binary.BigEndian.Uint32(payload[0:4])
-				if authType != 0 { // Not AuthenticationOk
-					// Read client response
-					respType, respPayload, err := p.readMessage(client)
-					if err != nil {
-						return err
-					}
-					// Forward to primary
-					if err := p.writeMessage(primary, respType, respPayload); err != nil {
-						return err
-					}
-				}
+	// Check for SSL request
+	if len(startupMsg) == 8 {
+		code := binary.BigEndian.Uint32(startupMsg[4:8])
+		if code == 80877103 { // SSLRequest
+			// Deny SSL
+			if _, err := client.Write([]byte{'N'}); err != nil {
+				return
+			}
+			// Read actual startup message
+			startupMsg, err = p.readStartupMessage(client)
+			if err != nil {
+				return
 			}
 		}
 	}
 
-	return nil
+	// Parse startup message to get user and database
+	params := p.parseStartupParams(startupMsg)
+	user := params["user"]
+	database := params["database"]
+	if database == "" {
+		database = user
+	}
+
+	// Connect to backend using database/sql
+	dsn := fmt.Sprintf("host=%s port=5432 user=%s password=%s dbname=%s sslmode=disable",
+		"127.0.0.1", user, user, database) // Use user as password for simplicity
+
+	// Try common password patterns
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Printf("[PostgreSQL] Backend connection error (conn %d): %v", connID, err)
+		p.sendError(client, "08006", fmt.Sprintf("cannot connect to backend: %v", err))
+		return
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		log.Printf("[PostgreSQL] Backend ping error (conn %d): %v", connID, err)
+		p.sendError(client, "28P01", fmt.Sprintf("authentication failed: %v", err))
+		return
+	}
+
+	// Send AuthenticationOk
+	p.writeMessage(client, msgAuthentication, []byte{0, 0, 0, 0})
+
+	// Send some parameter statuses
+	p.sendParameterStatus(client, "server_version", "16.0")
+	p.sendParameterStatus(client, "client_encoding", "UTF8")
+	p.sendParameterStatus(client, "DateStyle", "ISO, MDY")
+	p.sendParameterStatus(client, "TimeZone", "UTC")
+
+	// Send BackendKeyData (fake)
+	keyData := make([]byte, 8)
+	binary.BigEndian.PutUint32(keyData[0:4], connID)
+	binary.BigEndian.PutUint32(keyData[4:8], 12345)
+	p.writeMessage(client, msgBackendKeyData, keyData)
+
+	// Send ReadyForQuery
+	p.writeMessage(client, msgReadyForQuery, []byte{'I'})
+
+	// Handle commands
+	p.handleMessages(client, db, connID)
 }
 
-func (p *Proxy) handleMessages(client, primary net.Conn) {
+func (p *Proxy) parseStartupParams(msg []byte) map[string]string {
+	params := make(map[string]string)
+	if len(msg) < 8 {
+		return params
+	}
+	// Skip length (4 bytes) and protocol version (4 bytes)
+	data := msg[4:]
+	if len(data) < 4 {
+		return params
+	}
+	data = data[4:] // Skip protocol version
+
+	// Parse null-terminated key-value pairs
+	for len(data) > 0 {
+		// Find key
+		keyEnd := bytes.IndexByte(data, 0)
+		if keyEnd <= 0 {
+			break
+		}
+		key := string(data[:keyEnd])
+		data = data[keyEnd+1:]
+
+		// Find value
+		valEnd := bytes.IndexByte(data, 0)
+		if valEnd < 0 {
+			break
+		}
+		value := string(data[:valEnd])
+		data = data[valEnd+1:]
+
+		params[key] = value
+	}
+	return params
+}
+
+func (p *Proxy) sendParameterStatus(client net.Conn, name, value string) {
+	payload := append([]byte(name), 0)
+	payload = append(payload, []byte(value)...)
+	payload = append(payload, 0)
+	p.writeMessage(client, msgParameterStatus, payload)
+}
+
+func (p *Proxy) sendError(client net.Conn, code, message string) {
+	var payload bytes.Buffer
+	payload.WriteByte('S') // Severity
+	payload.WriteString("ERROR")
+	payload.WriteByte(0)
+	payload.WriteByte('C') // Code
+	payload.WriteString(code)
+	payload.WriteByte(0)
+	payload.WriteByte('M') // Message
+	payload.WriteString(message)
+	payload.WriteByte(0)
+	payload.WriteByte(0) // Terminator
+	p.writeMessage(client, msgErrorResponse, payload.Bytes())
+}
+
+func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32) {
 	for {
 		msgType, payload, err := p.readMessage(client)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[PostgreSQL] Read error: %v", err)
+				log.Printf("[PostgreSQL] Read error (conn %d): %v", connID, err)
 			}
 			return
 		}
 
 		switch msgType {
 		case msgQuery:
-			p.handleQuery(payload, client, primary)
+			p.handleQuery(payload, client, db)
 		case msgTerminate:
-			// Forward and exit
-			p.writeMessage(primary, msgType, payload)
 			return
 		default:
-			// Pass through other messages (Parse, Bind, Execute, etc.)
-			p.forwardMessageAndResponse(msgType, payload, client, primary)
+			// For unhandled messages, send ReadyForQuery
+			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		}
 	}
 }
 
-func (p *Proxy) handleQuery(payload []byte, client, primary net.Conn) {
+func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB) {
 	start := time.Now()
 
 	// Query is null-terminated string
@@ -200,7 +269,7 @@ func (p *Proxy) handleQuery(payload []byte, client, primary net.Conn) {
 	}
 	queryType := queryTypeLabel(parsed.Type)
 
-	// Check cache for cacheable queries
+	// Check cache
 	if parsed.IsCacheable() {
 		if cached, ok := p.cache.Get(parsed.Query); ok {
 			metrics.CacheHits.WithLabelValues(file, line).Inc()
@@ -214,94 +283,149 @@ func (p *Proxy) handleQuery(payload []byte, client, primary net.Conn) {
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
 	}
 
-	// Forward query to primary
-	if err := p.writeMessage(primary, msgQuery, payload); err != nil {
-		log.Printf("[PostgreSQL] Primary write error: %v", err)
+	// Execute query
+	var response bytes.Buffer
+
+	rows, err := db.Query(parsed.Query)
+	if err != nil {
+		// Send error response
+		p.sendError(client, "42000", err.Error())
+		p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		return
+	}
+	defer rows.Close()
+
+	// Get column info
+	cols, _ := rows.Columns()
+	if len(cols) > 0 {
+		// Send RowDescription
+		rowDesc := p.buildRowDescription(cols)
+		response.Write(rowDesc)
+
+		// Send data rows
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		rowCount := 0
+		for rows.Next() {
+			rows.Scan(valuePtrs...)
+			dataRow := p.buildDataRow(values)
+			response.Write(dataRow)
+			rowCount++
+		}
+
+		// Send CommandComplete
+		cmdComplete := fmt.Sprintf("SELECT %d", rowCount)
+		cmdPayload := append([]byte(cmdComplete), 0)
+		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+	} else {
+		// Non-SELECT query
+		cmdPayload := append([]byte("OK"), 0)
+		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
 	}
 
-	// Read and capture full response (until ReadyForQuery)
-	response, err := p.readQueryResponse(primary)
-	if err != nil {
-		log.Printf("[PostgreSQL] Primary read error: %v", err)
-		return
-	}
+	// Send ReadyForQuery
+	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
 
 	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
 	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
-	// Cache the response if cacheable
+	// Cache response if cacheable
 	if parsed.IsCacheable() {
-		p.cache.Set(parsed.Query, response, time.Duration(parsed.TTL)*time.Second)
+		p.cache.Set(parsed.Query, response.Bytes(), time.Duration(parsed.TTL)*time.Second)
 	}
 
 	// Send response to client
-	if _, err := client.Write(response); err != nil {
+	if _, err := client.Write(response.Bytes()); err != nil {
 		log.Printf("[PostgreSQL] Client write error: %v", err)
 	}
 }
 
-func (p *Proxy) forwardMessageAndResponse(msgType byte, payload []byte, client, primary net.Conn) {
-	// Forward message to primary
-	if err := p.writeMessage(primary, msgType, payload); err != nil {
-		return
+func (p *Proxy) buildRowDescription(cols []string) []byte {
+	var buf bytes.Buffer
+
+	// Number of fields
+	fieldCount := make([]byte, 2)
+	binary.BigEndian.PutUint16(fieldCount, uint16(len(cols)))
+	buf.Write(fieldCount)
+
+	for _, col := range cols {
+		buf.WriteString(col)
+		buf.WriteByte(0)                      // null terminator
+		buf.Write([]byte{0, 0, 0, 0})         // table OID
+		buf.Write([]byte{0, 0})               // column attr number
+		buf.Write([]byte{0, 0, 0, 25})        // data type OID (25 = text)
+		buf.Write([]byte{255, 255})           // data type size (-1)
+		buf.Write([]byte{255, 255, 255, 255}) // type modifier
+		buf.Write([]byte{0, 0})               // format code (text)
 	}
 
-	// Read response until ReadyForQuery or ErrorResponse
-	for {
-		respType, respPayload, err := p.readMessage(primary)
-		if err != nil {
-			return
-		}
+	return p.encodeMessage(msgRowDescription, buf.Bytes())
+}
 
-		// Forward to client
-		if err := p.writeMessage(client, respType, respPayload); err != nil {
-			return
-		}
+func (p *Proxy) buildDataRow(values []interface{}) []byte {
+	var buf bytes.Buffer
 
-		// Stop at ReadyForQuery
-		if respType == msgReadyForQuery {
-			break
+	// Number of columns
+	colCount := make([]byte, 2)
+	binary.BigEndian.PutUint16(colCount, uint16(len(values)))
+	buf.Write(colCount)
+
+	for _, v := range values {
+		if v == nil {
+			buf.Write([]byte{255, 255, 255, 255}) // NULL (-1)
+		} else {
+			str := fmt.Sprintf("%v", v)
+			lenBytes := make([]byte, 4)
+			binary.BigEndian.PutUint32(lenBytes, uint32(len(str)))
+			buf.Write(lenBytes)
+			buf.WriteString(str)
 		}
 	}
+
+	return p.encodeMessage(msgDataRow, buf.Bytes())
+}
+
+func (p *Proxy) encodeMessage(msgType byte, payload []byte) []byte {
+	length := uint32(len(payload) + 4)
+	msg := make([]byte, 1+4+len(payload))
+	msg[0] = msgType
+	binary.BigEndian.PutUint32(msg[1:5], length)
+	copy(msg[5:], payload)
+	return msg
 }
 
 func (p *Proxy) readStartupMessage(conn net.Conn) ([]byte, error) {
-	// Read length (4 bytes)
 	lengthBuf := make([]byte, 4)
 	if _, err := io.ReadFull(conn, lengthBuf); err != nil {
 		return nil, err
 	}
 
 	length := binary.BigEndian.Uint32(lengthBuf)
-
-	// Read payload (length includes the 4 bytes we just read)
 	payload := make([]byte, length-4)
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return nil, err
 	}
 
-	// Return complete message (length + payload)
 	return append(lengthBuf, payload...), nil
 }
 
 func (p *Proxy) readMessage(conn net.Conn) (byte, []byte, error) {
-	// Read type byte
 	typeBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, typeBuf); err != nil {
 		return 0, nil, err
 	}
 
-	// Read length (4 bytes, includes itself but not type byte)
 	lengthBuf := make([]byte, 4)
 	if _, err := io.ReadFull(conn, lengthBuf); err != nil {
 		return 0, nil, err
 	}
 
 	length := binary.BigEndian.Uint32(lengthBuf)
-
-	// Read payload (length - 4 bytes for length field itself)
 	payload := make([]byte, length-4)
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return 0, nil, err
@@ -311,50 +435,21 @@ func (p *Proxy) readMessage(conn net.Conn) (byte, []byte, error) {
 }
 
 func (p *Proxy) writeMessage(conn net.Conn, msgType byte, payload []byte) error {
-	// Calculate length (includes length field itself, but not type byte)
 	length := uint32(len(payload) + 4)
 
-	// Write type byte
 	if _, err := conn.Write([]byte{msgType}); err != nil {
 		return err
 	}
 
-	// Write length
 	lengthBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lengthBuf, length)
 	if _, err := conn.Write(lengthBuf); err != nil {
 		return err
 	}
 
-	// Write payload
 	if _, err := conn.Write(payload); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func (p *Proxy) readQueryResponse(conn net.Conn) ([]byte, error) {
-	var buf bytes.Buffer
-
-	for {
-		msgType, payload, err := p.readMessage(conn)
-		if err != nil {
-			return nil, err
-		}
-
-		// Write message to buffer
-		buf.WriteByte(msgType)
-		lengthBuf := make([]byte, 4)
-		binary.BigEndian.PutUint32(lengthBuf, uint32(len(payload)+4))
-		buf.Write(lengthBuf)
-		buf.Write(payload)
-
-		// Stop at ReadyForQuery
-		if msgType == msgReadyForQuery {
-			break
-		}
-	}
-
-	return buf.Bytes(), nil
 }

@@ -280,7 +280,9 @@ func (c *clientConn) run() {
 		data := packet[1:]
 
 		if err := c.dispatch(cmd, data); err != nil {
-			log.Printf("[MySQL] Command error (conn %d): %v", c.connID, err)
+			if err != io.EOF {
+				log.Printf("[MySQL] Command error (conn %d): %v", c.connID, err)
+			}
 			c.writeError(err)
 		}
 

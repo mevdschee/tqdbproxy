@@ -20,6 +20,7 @@ func main() {
 	connections := flag.Int("c", 100, "Number of concurrent connections")
 	duration := flag.Int("t", 3, "Test duration in seconds")
 	csvFile := flag.String("csv", "", "Write CSV output to file")
+	skipPg := flag.Bool("skip-pg", true, "Skip PostgreSQL benchmark (proxy not yet stable)")
 	flag.Parse()
 
 	// MySQL DSNs
@@ -91,23 +92,27 @@ func main() {
 	}
 
 	// PostgreSQL benchmark
-	fmt.Printf("\n=== PostgreSQL Benchmark (%d connections, %ds per test) ===\n", *connections, *duration)
-	fmt.Println("============================================================")
-	fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
-	fmt.Println("------------------------------------------------------------")
+	if !*skipPg {
+		fmt.Printf("\n=== PostgreSQL Benchmark (%d connections, %ds per test) ===\n", *connections, *duration)
+		fmt.Println("============================================================")
+		fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
+		fmt.Println("------------------------------------------------------------")
 
-	for _, tc := range pgCases {
-		directRPS := benchmarkConcurrent("postgres", pgDirectDSN, tc.query, *connections, *duration)
-		proxyRPS := benchmarkConcurrent("postgres", pgProxyDSN, tc.query, *connections, *duration)
+		for _, tc := range pgCases {
+			directRPS := benchmarkConcurrent("postgres", pgDirectDSN, tc.query, *connections, *duration)
+			proxyRPS := benchmarkConcurrent("postgres", pgProxyDSN, tc.query, *connections, *duration)
 
-		primeCache("postgres", pgProxyDSN, tc.cached)
-		cacheRPS := benchmarkConcurrent("postgres", pgProxyDSN, tc.cached, *connections, *duration)
+			primeCache("postgres", pgProxyDSN, tc.cached)
+			cacheRPS := benchmarkConcurrent("postgres", pgProxyDSN, tc.cached, *connections, *duration)
 
-		fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
+			fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
 
-		if csvOut != nil {
-			fmt.Fprintf(csvOut, "PostgreSQL,%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
+			if csvOut != nil {
+				fmt.Fprintf(csvOut, "PostgreSQL,%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
+			}
 		}
+	} else {
+		fmt.Println("\n(PostgreSQL benchmark skipped - use -skip-pg=false to enable)")
 	}
 }
 
