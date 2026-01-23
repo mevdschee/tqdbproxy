@@ -23,16 +23,16 @@ func main() {
 	skipPg := flag.Bool("skip-pg", true, "Skip PostgreSQL benchmark (proxy not yet stable)")
 	flag.Parse()
 
-	// MySQL DSNs
-	mysqlDirectDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/%s", *user, *pass, *db)
-	mysqlProxyDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3307)/%s", *user, *pass, *db)
+	// MariaDB DSNs
+	mariadbDirectDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/%s", *user, *pass, *db)
+	mariadbProxyDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3307)/%s", *user, *pass, *db)
 
 	// PostgreSQL DSNs
 	pgDirectDSN := fmt.Sprintf("host=127.0.0.1 port=5432 user=%s password=%s dbname=%s sslmode=disable", *user, *pass, *db)
 	pgProxyDSN := fmt.Sprintf("host=127.0.0.1 port=5433 user=%s password=%s dbname=%s sslmode=disable", *user, *pass, *db)
 
-	// Test cases for MySQL
-	mysqlCases := []struct {
+	// Test cases for MariaDB
+	mariadbCases := []struct {
 		name    string
 		sleepMs float64
 		query   string
@@ -71,23 +71,23 @@ func main() {
 		fmt.Fprintln(csvOut, "Database,QueryType,SleepMs,DirectRPS,ProxyRPS,CacheRPS")
 	}
 
-	// MySQL benchmark
-	fmt.Printf("\n=== MySQL Benchmark (%d connections, %ds per test) ===\n", *connections, *duration)
+	// MariaDB benchmark
+	fmt.Printf("\n=== MariaDB Benchmark (%d connections, %ds per test) ===\n", *connections, *duration)
 	fmt.Println("============================================================")
 	fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
 	fmt.Println("------------------------------------------------------------")
 
-	for _, tc := range mysqlCases {
-		directRPS := benchmarkConcurrent("mysql", mysqlDirectDSN, tc.query, *connections, *duration)
-		proxyRPS := benchmarkConcurrent("mysql", mysqlProxyDSN, tc.query, *connections, *duration)
+	for _, tc := range mariadbCases {
+		directRPS := benchmarkConcurrent("mysql", mariadbDirectDSN, tc.query, *connections, *duration)
+		proxyRPS := benchmarkConcurrent("mysql", mariadbProxyDSN, tc.query, *connections, *duration)
 
-		primeCache("mysql", mysqlProxyDSN, tc.cached)
-		cacheRPS := benchmarkConcurrent("mysql", mysqlProxyDSN, tc.cached, *connections, *duration)
+		primeCache("mysql", mariadbProxyDSN, tc.cached)
+		cacheRPS := benchmarkConcurrent("mysql", mariadbProxyDSN, tc.cached, *connections, *duration)
 
 		fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
 
 		if csvOut != nil {
-			fmt.Fprintf(csvOut, "MySQL,%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
+			fmt.Fprintf(csvOut, "MariaDB,%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
 		}
 	}
 

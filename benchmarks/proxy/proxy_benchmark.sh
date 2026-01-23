@@ -79,7 +79,7 @@ with open('proxy_benchmark.csv') as f:
     conns = first_line.split(': ')[1].strip() if ': ' in first_line else '?'
 
 # Split by database
-mysql_df = df[df['Database'] == 'MySQL']
+mariadb_df = df[df['Database'] == 'MariaDB']
 pg_df = df[df['Database'] == 'PostgreSQL']
 
 # Create figure with 2 subplots side by side
@@ -124,7 +124,7 @@ def plot_db(ax, data, title):
     max_val = max(data['DirectRPS'].max(), data['ProxyRPS'].max(), data['CacheRPS'].max())
     ax.set_ylim(0, max_val * 1.15)
 
-plot_db(ax1, mysql_df, 'MySQL')
+plot_db(ax1, mariadb_df, 'MariaDB')
 plot_db(ax2, pg_df, 'PostgreSQL')
 
 plt.suptitle('TQDBProxy Performance Benchmark - Higher is better', fontsize=14)
