@@ -1,11 +1,11 @@
-# @tqdbproxy/mysql
+# @tqdbproxy/mariadb
 
-TypeScript MySQL client library for TQDBProxy with TTL-aware caching.
+TypeScript MariaDB client library for TQDBProxy with TTL-aware caching.
 
 ## Installation
 
 ```bash
-npm install @tqdbproxy/mysql mysql2
+npm install @tqdbproxy/mariadb mysql2
 ```
 
 ## Requirements
@@ -18,7 +18,7 @@ npm install @tqdbproxy/mysql mysql2
 ### Basic Example
 
 ```typescript
-import { Database } from '@tqdbproxy/mysql';
+import { Database } from '@tqdbproxy/mariadb';
 
 async function main() {
   // Create a new connection through TQDBProxy
@@ -48,7 +48,7 @@ main();
 
 ```typescript
 import mysql from 'mysql2/promise';
-import { Database } from '@tqdbproxy/mysql';
+import { Database } from '@tqdbproxy/mariadb';
 
 async function main() {
   // Create a standard mysql2 connection
@@ -166,7 +166,7 @@ This library is written in TypeScript and includes full type definitions. You ge
 ## Testing
 
 ```bash
-cd clients/ts/mysql
+cd clients/ts/mariadb
 npm install
 npm test
 ```
