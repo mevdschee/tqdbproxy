@@ -1,7 +1,7 @@
 import mysql, { Connection, RowDataPacket, OkPacket, ResultSetHeader, FieldPacket } from 'mysql2/promise';
 
 /**
- * Database wrapper for TQDBProxy MySQL with TTL-aware caching
+ * Database wrapper for TQDBProxy MariaDB with TTL-aware caching
  * 
  * This class wraps mysql2/promise and provides methods to execute queries with cache TTL hints
  * that are automatically injected as SQL comments along with caller metadata.
@@ -32,7 +32,7 @@ export class Database {
     /**
      * Create a new Database instance
      * 
-     * @param config MySQL connection configuration
+     * @param config MariaDB connection configuration
      * @returns Promise<Database>
      */
     static async create(config: mysql.ConnectionOptions): Promise<Database> {

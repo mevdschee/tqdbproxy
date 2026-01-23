@@ -1,12 +1,12 @@
 <?php
 
-namespace TQDBProxy\MySQL;
+namespace TQDBProxy\MariaDB;
 
 use PDO;
 use PDOStatement;
 
 /**
- * Database wrapper for TQDBProxy MySQL with TTL-aware caching
+ * Database wrapper for TQDBProxy MariaDB with TTL-aware caching
  * 
  * This class wraps PDO and provides methods to execute queries with cache TTL hints
  * that are automatically injected as SQL comments along with caller metadata.

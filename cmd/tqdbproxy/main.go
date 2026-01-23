@@ -12,8 +12,8 @@ import (
 
 	"github.com/mevdschee/tqdbproxy/cache"
 	"github.com/mevdschee/tqdbproxy/config"
+	"github.com/mevdschee/tqdbproxy/mariadb"
 	"github.com/mevdschee/tqdbproxy/metrics"
-	"github.com/mevdschee/tqdbproxy/mysql"
 	"github.com/mevdschee/tqdbproxy/postgres"
 	"github.com/mevdschee/tqdbproxy/replica"
 )
@@ -46,19 +46,19 @@ func main() {
 		log.Fatalf("Failed to create cache: %v", err)
 	}
 
-	// Create MySQL replica pool
-	mysqlPool := replica.NewPool(cfg.MySQL.Primary, cfg.MySQL.Replicas)
-	log.Printf("[MySQL] Primary: %s, Replicas: %v", cfg.MySQL.Primary, cfg.MySQL.Replicas)
+	// Create MariaDB replica pool
+	mariadbPool := replica.NewPool(cfg.MariaDB.Primary, cfg.MariaDB.Replicas)
+	log.Printf("[MariaDB] Primary: %s, Replicas: %v", cfg.MariaDB.Primary, cfg.MariaDB.Replicas)
 
-	// Start health checks for MySQL replicas
+	// Start health checks for MariaDB replicas
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go mysqlPool.StartHealthChecks(ctx, 10*time.Second)
+	go mariadbPool.StartHealthChecks(ctx, 10*time.Second)
 
-	// Start MySQL proxy with replica pool
-	mysqlProxy := mysql.New(cfg.MySQL.Listen, mysqlPool, queryCache)
-	if err := mysqlProxy.Start(); err != nil {
-		log.Fatalf("Failed to start MySQL proxy: %v", err)
+	// Start MariaDB proxy with replica pool
+	mariadbProxy := mariadb.New(cfg.MariaDB.Listen, mariadbPool, queryCache)
+	if err := mariadbProxy.Start(); err != nil {
+		log.Fatalf("Failed to start MariaDB proxy: %v", err)
 	}
 
 	// Create PostgreSQL replica pool

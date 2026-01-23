@@ -1,4 +1,4 @@
-package mysql
+package mariadb
 
 import (
 	"crypto/rand"
@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 )
 
-// MySQL protocol constants
+// MariaDB protocol constants
 const (
 	OK_HEADER  = 0x00
 	ERR_HEADER = 0xff
@@ -76,7 +76,7 @@ func GenerateSalt() ([]byte, error) {
 	return salt, nil
 }
 
-// CalcPassword calculates MySQL native password hash
+// CalcPassword calculates MariaDB native password hash
 // scramble = SHA1(salt + SHA1(SHA1(password)))
 func CalcPassword(salt, password []byte) []byte {
 	if len(password) == 0 {
@@ -106,7 +106,7 @@ func CalcPassword(salt, password []byte) []byte {
 	return scramble
 }
 
-// PutLengthEncodedInt encodes an integer as MySQL length-encoded integer
+// PutLengthEncodedInt encodes an integer as MariaDB length-encoded integer
 func PutLengthEncodedInt(n uint64) []byte {
 	switch {
 	case n < 251:
@@ -128,7 +128,7 @@ func PutLengthEncodedString(s []byte) []byte {
 	return append(result, s...)
 }
 
-// ReadLengthEncodedInt reads a MySQL length-encoded integer
+// ReadLengthEncodedInt reads a MariaDB length-encoded integer
 // Returns: value, isNull, bytesRead
 func ReadLengthEncodedInt(b []byte) (uint64, bool, int) {
 	if len(b) == 0 {
@@ -159,7 +159,7 @@ func ReadLengthEncodedInt(b []byte) (uint64, bool, int) {
 	}
 }
 
-// WriteOKPacket creates a MySQL OK packet
+// WriteOKPacket creates a MariaDB OK packet
 func WriteOKPacket(affectedRows, insertId uint64, status uint16, capability uint32) []byte {
 	data := make([]byte, 4, 32)
 	data = append(data, OK_HEADER)
@@ -176,7 +176,7 @@ func WriteOKPacket(affectedRows, insertId uint64, status uint16, capability uint
 	return data
 }
 
-// WriteErrorPacket creates a MySQL error packet
+// WriteErrorPacket creates a MariaDB error packet
 func WriteErrorPacket(errno uint16, sqlState, message string, capability uint32) []byte {
 	data := make([]byte, 4, 16+len(message))
 	data = append(data, ERR_HEADER)
@@ -194,7 +194,7 @@ func WriteErrorPacket(errno uint16, sqlState, message string, capability uint32)
 	return data
 }
 
-// WriteEOFPacket creates a MySQL EOF packet
+// WriteEOFPacket creates a MariaDB EOF packet
 func WriteEOFPacket(status uint16, capability uint32) []byte {
 	data := make([]byte, 4, 9)
 	data = append(data, EOF_HEADER)

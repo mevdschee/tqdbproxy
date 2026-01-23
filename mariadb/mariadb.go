@@ -1,4 +1,4 @@
-package mysql
+package mariadb
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ const (
 	comStmtExecute = 0x17
 )
 
-// Proxy implements a MySQL server that forwards to backend
+// Proxy implements a MariaDB server that forwards to backend
 type Proxy struct {
 	listen      string
 	replicaPool *replica.Pool
@@ -38,7 +38,7 @@ type Proxy struct {
 	connID      uint32
 }
 
-// New creates a new MySQL proxy
+// New creates a new MariaDB proxy
 func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
 		listen:      listen,
@@ -48,9 +48,9 @@ func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
 	}
 }
 
-// Start begins accepting MySQL connections
+// Start begins accepting MariaDB connections
 func (p *Proxy) Start() error {
-	// Connect to backend MySQL (using tqdbproxy credentials for testing)
+	// Connect to backend MariaDB (using tqdbproxy credentials for testing)
 	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", p.replicaPool.GetPrimary())
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -62,13 +62,13 @@ func (p *Proxy) Start() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("[MySQL] Listening on %s, forwarding to %s", p.listen, p.replicaPool.GetPrimary())
+	log.Printf("[MariaDB] Listening on %s, forwarding to %s", p.listen, p.replicaPool.GetPrimary())
 
 	go func() {
 		for {
 			client, err := listener.Accept()
 			if err != nil {
-				log.Printf("[MySQL] Accept error: %v", err)
+				log.Printf("[MariaDB] Accept error: %v", err)
 				continue
 			}
 			p.connID++
@@ -86,7 +86,7 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", p.replicaPool.GetPrimary())
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Printf("[MySQL] Failed to connect to backend for conn %d: %v", connID, err)
+		log.Printf("[MariaDB] Failed to connect to backend for conn %d: %v", connID, err)
 		return
 	}
 	defer db.Close()
@@ -103,7 +103,7 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 
 	// Perform handshake
 	if err := conn.handshake(); err != nil {
-		log.Printf("[MySQL] Handshake error (conn %d): %v", connID, err)
+		log.Printf("[MariaDB] Handshake error (conn %d): %v", connID, err)
 		return
 	}
 
@@ -267,7 +267,7 @@ func (c *clientConn) run() {
 		packet, err := c.readPacket()
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[MySQL] Read error (conn %d): %v", c.connID, err)
+				log.Printf("[MariaDB] Read error (conn %d): %v", c.connID, err)
 			}
 			return
 		}
@@ -281,7 +281,7 @@ func (c *clientConn) run() {
 
 		if err := c.dispatch(cmd, data); err != nil {
 			if err != io.EOF {
-				log.Printf("[MySQL] Command error (conn %d): %v", c.connID, err)
+				log.Printf("[MariaDB] Command error (conn %d): %v", c.connID, err)
 			}
 			c.writeError(err)
 		}
@@ -352,8 +352,8 @@ func (c *clientConn) handleQuery(query string) error {
 	parsed := parser.Parse(query)
 
 	// Debug: log the query and parsed metadata (commented out for performance)
-	// log.Printf("[MySQL] Raw query from client: %q", query)
-	// log.Printf("[MySQL] Parsed - File: %q, Line: %d, TTL: %d, Clean query: %q", parsed.File, parsed.Line, parsed.TTL, parsed.Query)
+	// log.Printf("[MariaDB] Raw query from client: %q", query)
+	// log.Printf("[MariaDB] Parsed - File: %q, Line: %d, TTL: %d, Clean query: %q", parsed.File, parsed.Line, parsed.TTL, parsed.Query)
 
 	file := parsed.File
 	if file == "" {

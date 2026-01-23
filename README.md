@@ -1,6 +1,6 @@
 # TQDBProxy
 
-A high-performance MySQL and PostgreSQL proxy with caching, read replica, metrics, and transaction support.
+A high-performance MariaDB and PostgreSQL proxy with caching, read replica, metrics, and transaction support.
 
 ## Features
 
@@ -9,7 +9,7 @@ A high-performance MySQL and PostgreSQL proxy with caching, read replica, metric
 - **Metrics**: Prometheus metrics for cache hits/misses, query latency, and more
 - **Read Replica Support**: Automatic routing of SELECT queries to replicas
 - **Transaction Support**: Full BEGIN/COMMIT/ROLLBACK support
-- **Interactive Mode**: Full MySQL client support without restrictions
+- **Interactive Mode**: Full MariaDB client support without restrictions
 
 ## Performance
 
@@ -23,8 +23,8 @@ Cache hits are as fast as empty queries with 100 connections. Proxy overhead is 
 # Start the proxy
 ./tqdbproxy
 
-# Connect via MySQL client (interactive mode)
-mysql -u tqdbproxy -p -P 3307 tqdbproxy --comments
+# Connect via MariaDB client (interactive mode)
+mariadb -u tqdbproxy -p -P 3307 tqdbproxy --comments
 ```
 
 ## Using Metadata Comments
@@ -35,7 +35,7 @@ Add caller metadata to your queries for better observability:
 /* ttl:60 file:app.php line:42 */ SELECT * FROM users WHERE active = 1
 ```
 
-NB: When using the MySQL CLI, you **must** use the `--comments` flag to preserve metadata comments
+NB: When using the MariaDB CLI, you **must** use the `--comments` flag to preserve metadata comments
 
 ## Transaction Support
 
@@ -58,9 +58,9 @@ All query types supported:
 
 Check which backend served the last query:
 
-**MySQL:**
+**MariaDB:**
 ```sql
-mysql> SHOW TQDB STATUS;
+mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 | Variable_name | Value   |
 +---------------+---------+

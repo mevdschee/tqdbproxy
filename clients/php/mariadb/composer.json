@@ -1,8 +1,14 @@
 {
-    "name": "mevdschee/tqdbproxy-mysql",
-    "description": "MySQL client for TQDBProxy with TTL-aware caching",
+    "name": "mevdschee/tqdbproxy-mariadb",
+    "description": "MariaDB client for TQDBProxy with TTL-aware caching",
     "type": "library",
-    "keywords": ["mysql", "pdo", "cache", "proxy", "tqdbproxy"],
+    "keywords": [
+        "mariadb",
+        "pdo",
+        "cache",
+        "proxy",
+        "tqdbproxy"
+    ],
     "license": "MIT",
     "authors": [
         {
@@ -19,12 +25,12 @@
     },
     "autoload": {
         "psr-4": {
-            "TQDBProxy\\MySQL\\": "src/"
+            "TQDBProxy\\MariaDB\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "TQDBProxy\\MySQL\\Tests\\": "tests/"
+            "TQDBProxy\\MariaDB\\Tests\\": "tests/"
         }
     }
 }

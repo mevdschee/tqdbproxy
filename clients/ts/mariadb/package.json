@@ -1,7 +1,7 @@
 {
-    "name": "@tqdbproxy/mysql",
+    "name": "@tqdbproxy/mariadb",
     "version": "1.0.0",
-    "description": "MySQL client for TQDBProxy with TTL-aware caching",
+    "description": "MariaDB client for TQDBProxy with TTL-aware caching",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "scripts": {
@@ -10,7 +10,7 @@
         "prepublishOnly": "npm run build"
     },
     "keywords": [
-        "mysql",
+        "mariadb",
         "mysql2",
         "cache",
         "proxy",

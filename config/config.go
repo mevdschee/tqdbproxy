@@ -9,7 +9,7 @@ import (
 
 // Config holds the proxy configuration
 type Config struct {
-	MySQL    ProxyConfig
+	MariaDB  ProxyConfig
 	Postgres ProxyConfig
 }
 
@@ -28,16 +28,16 @@ func Load(path string) (*Config, error) {
 	}
 
 	config := &Config{
-		MySQL:    loadProxyConfig(cfg, "mysql", ":3307", "127.0.0.1:3306"),
+		MariaDB:  loadProxyConfig(cfg, "mariadb", ":3307", "127.0.0.1:3306"),
 		Postgres: loadProxyConfig(cfg, "postgres", ":5433", "127.0.0.1:5432"),
 	}
 
-	// Environment variable overrides for MySQL
-	if v := os.Getenv("TQDBPROXY_MYSQL_LISTEN"); v != "" {
-		config.MySQL.Listen = v
+	// Environment variable overrides for MariaDB
+	if v := os.Getenv("TQDBPROXY_MARIADB_LISTEN"); v != "" {
+		config.MariaDB.Listen = v
 	}
-	if v := os.Getenv("TQDBPROXY_MYSQL_PRIMARY"); v != "" {
-		config.MySQL.Primary = v
+	if v := os.Getenv("TQDBPROXY_MARIADB_PRIMARY"); v != "" {
+		config.MariaDB.Primary = v
 	}
 
 	// Environment variable overrides for Postgres

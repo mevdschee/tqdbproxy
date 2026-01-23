@@ -4,9 +4,9 @@ To make adoption effortless, TQDBProxy includes client libraries that wrap exist
 
 ## Supported Languages
 
-- **[Go](../../clients/go/)**: Supports both MySQL and PostgreSQL.
-- **[PHP](../../clients/php/)**: Supports both MySQL and PostgreSQL.
-- **[TypeScript](../../clients/ts/)**: Supports both MySQL and PostgreSQL.
+- **[Go](../../clients/go/)**: Supports both MariaDB and PostgreSQL.
+- **[PHP](../../clients/php/)**: Supports both MariaDB and PostgreSQL.
+- **[TypeScript](../../clients/ts/)**: Supports both MariaDB and PostgreSQL.
 
 ## How it Works
 
