@@ -7,9 +7,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Configuration - set your MySQL credentials here
-MYSQL_USER="${MYSQL_USER:-tqdbproxy}"
-MYSQL_PASS="${MYSQL_PASS:-tqdbproxy}"
+# Configuration - set your database credentials here
+DATABASE_USER="${DATABASE_USER:-tqdbproxy}"
+DATABASE_PASS="${DATABASE_PASS:-tqdbproxy}"
+DATABASE_NAME="${DATABASE_NAME:-tqdbproxy}"
 CONNECTIONS="${CONNECTIONS:-100}"
 DURATION="${DURATION:-3}"
 
@@ -58,7 +59,7 @@ fi
 echo ""
 echo "Running benchmark ($CONNECTIONS connections, ${DURATION}s per test)..."
 echo ""
-./benchmark-tool -user "$MYSQL_USER" -pass "$MYSQL_PASS" -c "$CONNECTIONS" -t "$DURATION" -csv proxy_benchmark.csv
+./benchmark-tool -user "$DATABASE_USER" -pass "$DATABASE_PASS" -db "$DATABASE_NAME" -c "$CONNECTIONS" -t "$DURATION" -csv proxy_benchmark.csv
 
 # Generate visualization
 echo ""
@@ -72,45 +73,66 @@ import numpy as np
 # Load data
 df = pd.read_csv('proxy_benchmark.csv', comment='#')
 
-# Create figure
-fig, ax = plt.subplots(figsize=(14, 6))
-x = np.arange(len(df))
-width = 0.25
-
-bars1 = ax.bar(x - width, df['DirectRPS'], width, label='Direct MySQL', color='#2ecc71')
-bars2 = ax.bar(x, df['ProxyRPS'], width, label='TQDBProxy', color='#3498db')
-bars3 = ax.bar(x + width, df['CacheRPS'], width, label='TQDBProxy (cache)', color='#e74c3c')
-
-ax.set_xlabel('Query Complexity', fontsize=12)
-ax.set_ylabel('Requests Per Second (RPS)', fontsize=12)
-
 # Get connection count from first line
 with open('proxy_benchmark.csv') as f:
     first_line = f.readline()
     conns = first_line.split(': ')[1].strip() if ': ' in first_line else '?'
 
-ax.set_title(f'TQDBProxy Performance: Direct MySQL vs Proxy vs Cache ({conns} connections)\nHigher is better', fontsize=14)
-ax.set_xticks(x)
-ax.set_xticklabels(df['QueryType'])
-ax.legend(loc='upper right', fontsize=11)
-ax.grid(axis='y', linestyle='--', alpha=0.7)
+# Split by database
+DATABASE_df = df[df['Database'] == 'MySQL']
+pg_df = df[df['Database'] == 'PostgreSQL']
 
-def add_labels(bars):
-    for bar in bars:
-        height = bar.get_height()
-        if height >= 1000:
-            label = f'{height/1000:.0f}k'
-        else:
-            label = f'{height:.0f}'
-        ax.annotate(label, xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3), textcoords="offset points",
-                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+# Create figure with 2 subplots
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-add_labels(bars1)
-add_labels(bars2)
-add_labels(bars3)
-ax.set_ylim(0, max(df['DirectRPS'].max(), df['ProxyRPS'].max(), df['CacheRPS'].max()) * 1.15)
-plt.tight_layout()
+def plot_db(ax, data, title):
+    x = np.arange(len(data))
+    width = 0.25
+    
+    bars1 = ax.bar(x - width, data['DirectRPS'], width, label='Direct', color='#2ecc71')
+    bars2 = ax.bar(x, data['ProxyRPS'], width, label='Proxy', color='#3498db')
+    bars3 = ax.bar(x + width, data['CacheRPS'], width, label='Cache', color='#e74c3c')
+    
+    ax.set_xlabel('Query Complexity', fontsize=11)
+    ax.set_ylabel('Requests Per Second (RPS)', fontsize=11)
+    ax.set_title(f'{title}\n({conns} connections)', fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels(data['QueryType'], fontsize=9)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    def add_labels(bars):
+        for bar in bars:
+            height = bar.get_height()
+            if height >= 1000:
+                label = f'{height/1000:.0f}k'
+            else:
+                label = f'{height:.0f}'
+            ax.annotate(label, xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 3), textcoords="offset points",
+                        ha='center', va='bottom', fontsize=8, fontweight='bold')
+    
+    add_labels(bars1)
+    add_labels(bars2)
+    add_labels(bars3)
+    
+    max_val = max(data['DirectRPS'].max(), data['ProxyRPS'].max(), data['CacheRPS'].max())
+    ax.set_ylim(0, max_val * 1.15)
+
+if len(DATABASE_df) > 0:
+    plot_db(ax1, DATABASE_df, 'MySQL')
+else:
+    ax1.text(0.5, 0.5, 'MySQL: No data', ha='center', va='center', fontsize=14)
+    ax1.set_title('MySQL')
+
+if len(pg_df) > 0:
+    plot_db(ax2, pg_df, 'PostgreSQL')
+else:
+    ax2.text(0.5, 0.5, 'PostgreSQL: No data', ha='center', va='center', fontsize=14)
+    ax2.set_title('PostgreSQL')
+
+plt.suptitle('TQDBProxy Performance Benchmark - Higher is better', fontsize=14)
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 plt.savefig('proxy_benchmark.png', dpi=150, bbox_inches='tight')
 print("Saved: proxy_benchmark.png")
 EOF

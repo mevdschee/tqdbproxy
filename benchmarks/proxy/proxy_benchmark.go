@@ -10,27 +10,28 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	user := flag.String("user", "", "MySQL user")
-	pass := flag.String("pass", "", "MySQL password")
-	db := flag.String("db", "", "MySQL database")
+	user := flag.String("user", "tqdbproxy", "Database user")
+	pass := flag.String("pass", "tqdbproxy", "Database password")
+	db := flag.String("db", "tqdbproxy", "Database name")
 	connections := flag.Int("c", 10, "Number of concurrent connections")
 	duration := flag.Int("t", 3, "Test duration in seconds")
 	csvFile := flag.String("csv", "", "Write CSV output to file")
 	flag.Parse()
 
-	// Build DSN - handle empty password and database
-	auth := *user
-	if *pass != "" {
-		auth = *user + ":" + *pass
-	}
-	directDSN := fmt.Sprintf("%s@tcp(127.0.0.1:3306)/%s", auth, *db)
-	proxyDSN := fmt.Sprintf("%s@tcp(127.0.0.1:3307)/%s", auth, *db)
+	// MySQL DSNs
+	mysqlDirectDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/%s", *user, *pass, *db)
+	mysqlProxyDSN := fmt.Sprintf("%s:%s@tcp(127.0.0.1:3307)/%s", *user, *pass, *db)
 
-	// Test cases: different query complexities
-	testCases := []struct {
+	// PostgreSQL DSNs
+	pgDirectDSN := fmt.Sprintf("host=127.0.0.1 port=5432 user=%s password=%s dbname=%s sslmode=disable", *user, *pass, *db)
+	pgProxyDSN := fmt.Sprintf("host=127.0.0.1 port=5433 user=%s password=%s dbname=%s sslmode=disable", *user, *pass, *db)
+
+	// Test cases for MySQL
+	mysqlCases := []struct {
 		name    string
 		sleepMs float64
 		query   string
@@ -40,6 +41,19 @@ func main() {
 		{"SLEEP(0.1ms)", 0.1, "SELECT SLEEP(0.0001)", "/* ttl:60 */ SELECT SLEEP(0.0001)"},
 		{"SLEEP(1ms)", 1, "SELECT SLEEP(0.001)", "/* ttl:60 */ SELECT SLEEP(0.001)"},
 		{"SLEEP(10ms)", 10, "SELECT SLEEP(0.01)", "/* ttl:60 */ SELECT SLEEP(0.01)"},
+	}
+
+	// Test cases for PostgreSQL
+	pgCases := []struct {
+		name    string
+		sleepMs float64
+		query   string
+		cached  string
+	}{
+		{"pg_sleep(0)", 0, "SELECT pg_sleep(0)", "/* ttl:60 */ SELECT pg_sleep(0)"},
+		{"pg_sleep(0.1ms)", 0.1, "SELECT pg_sleep(0.0001)", "/* ttl:60 */ SELECT pg_sleep(0.0001)"},
+		{"pg_sleep(1ms)", 1, "SELECT pg_sleep(0.001)", "/* ttl:60 */ SELECT pg_sleep(0.001)"},
+		{"pg_sleep(10ms)", 10, "SELECT pg_sleep(0.01)", "/* ttl:60 */ SELECT pg_sleep(0.01)"},
 	}
 
 	// Open CSV file if specified
@@ -53,35 +67,52 @@ func main() {
 		}
 		defer csvOut.Close()
 		fmt.Fprintf(csvOut, "# Connections: %d\n", *connections)
-		fmt.Fprintln(csvOut, "QueryType,SleepMs,DirectRPS,ProxyRPS,CacheRPS")
+		fmt.Fprintln(csvOut, "Database,QueryType,SleepMs,DirectRPS,ProxyRPS,CacheRPS")
 	}
 
-	// Always print to stdout
-	fmt.Printf("MySQL Proxy Benchmark (%d connections, %ds per test)\n", *connections, *duration)
+	// MySQL benchmark
+	fmt.Printf("\n=== MySQL Benchmark (%d connections, %ds per test) ===\n", *connections, *duration)
 	fmt.Println("============================================================")
 	fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
 	fmt.Println("------------------------------------------------------------")
 
-	for _, tc := range testCases {
-		directRPS := benchmarkConcurrent(directDSN, tc.query, *connections, *duration)
-		proxyRPS := benchmarkConcurrent(proxyDSN, tc.query, *connections, *duration)
+	for _, tc := range mysqlCases {
+		directRPS := benchmarkConcurrent("mysql", mysqlDirectDSN, tc.query, *connections, *duration)
+		proxyRPS := benchmarkConcurrent("mysql", mysqlProxyDSN, tc.query, *connections, *duration)
 
-		// Prime cache then benchmark cache hits
-		primeCache(proxyDSN, tc.cached)
-		cacheRPS := benchmarkConcurrent(proxyDSN, tc.cached, *connections, *duration)
+		primeCache("mysql", mysqlProxyDSN, tc.cached)
+		cacheRPS := benchmarkConcurrent("mysql", mysqlProxyDSN, tc.cached, *connections, *duration)
 
-		// Always print to stdout
 		fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
 
-		// Write to CSV if specified
 		if csvOut != nil {
-			fmt.Fprintf(csvOut, "%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
+			fmt.Fprintf(csvOut, "MySQL,%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
+		}
+	}
+
+	// PostgreSQL benchmark
+	fmt.Printf("\n=== PostgreSQL Benchmark (%d connections, %ds per test) ===\n", *connections, *duration)
+	fmt.Println("============================================================")
+	fmt.Printf("%-15s %12s %12s %12s\n", "Query Type", "Direct RPS", "Proxy RPS", "Cache RPS")
+	fmt.Println("------------------------------------------------------------")
+
+	for _, tc := range pgCases {
+		directRPS := benchmarkConcurrent("postgres", pgDirectDSN, tc.query, *connections, *duration)
+		proxyRPS := benchmarkConcurrent("postgres", pgProxyDSN, tc.query, *connections, *duration)
+
+		primeCache("postgres", pgProxyDSN, tc.cached)
+		cacheRPS := benchmarkConcurrent("postgres", pgProxyDSN, tc.cached, *connections, *duration)
+
+		fmt.Printf("%-15s %12.0f %12.0f %12.0f\n", tc.name, directRPS, proxyRPS, cacheRPS)
+
+		if csvOut != nil {
+			fmt.Fprintf(csvOut, "PostgreSQL,%s,%.1f,%.0f,%.0f,%.0f\n", tc.name, tc.sleepMs, directRPS, proxyRPS, cacheRPS)
 		}
 	}
 }
 
-func primeCache(dsn, query string) {
-	db, err := sql.Open("mysql", dsn)
+func primeCache(driver, dsn, query string) {
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return
 	}
@@ -92,8 +123,8 @@ func primeCache(dsn, query string) {
 	}
 }
 
-func benchmarkConcurrent(dsn, query string, numConns, durationSec int) float64 {
-	db, err := sql.Open("mysql", dsn)
+func benchmarkConcurrent(driver, dsn, query string, numConns, durationSec int) float64 {
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect: %v\n", err)
 		return 0
