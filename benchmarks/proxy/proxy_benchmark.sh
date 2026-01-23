@@ -59,7 +59,7 @@ fi
 echo ""
 echo "Running benchmark ($CONNECTIONS connections, ${DURATION}s per test)..."
 echo ""
-./benchmark-tool -user "$DATABASE_USER" -pass "$DATABASE_PASS" -db "$DATABASE_NAME" -c "$CONNECTIONS" -t "$DURATION" -csv proxy_benchmark.csv
+./benchmark-tool -user "$DATABASE_USER" -pass "$DATABASE_PASS" -db "$DATABASE_NAME" -c "$CONNECTIONS" -t "$DURATION" -skip-pg=false -csv proxy_benchmark.csv
 
 # Generate visualization
 echo ""
@@ -79,13 +79,18 @@ with open('proxy_benchmark.csv') as f:
     conns = first_line.split(': ')[1].strip() if ': ' in first_line else '?'
 
 # Split by database
-DATABASE_df = df[df['Database'] == 'MySQL']
+mysql_df = df[df['Database'] == 'MySQL']
 pg_df = df[df['Database'] == 'PostgreSQL']
 
-# Create figure with 2 subplots
+# Create figure with 2 subplots side by side
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
 def plot_db(ax, data, title):
+    if len(data) == 0:
+        ax.text(0.5, 0.5, f'{title}: No data', ha='center', va='center', fontsize=14)
+        ax.set_title(title)
+        return
+    
     x = np.arange(len(data))
     width = 0.25
     
@@ -95,7 +100,7 @@ def plot_db(ax, data, title):
     
     ax.set_xlabel('Query Complexity', fontsize=11)
     ax.set_ylabel('Requests Per Second (RPS)', fontsize=11)
-    ax.set_title(f'{title}\n({conns} connections)', fontsize=12)
+    ax.set_title(f'{title} ({conns} connections)', fontsize=12)
     ax.set_xticks(x)
     ax.set_xticklabels(data['QueryType'], fontsize=9)
     ax.legend(loc='upper right', fontsize=10)
@@ -119,17 +124,8 @@ def plot_db(ax, data, title):
     max_val = max(data['DirectRPS'].max(), data['ProxyRPS'].max(), data['CacheRPS'].max())
     ax.set_ylim(0, max_val * 1.15)
 
-if len(DATABASE_df) > 0:
-    plot_db(ax1, DATABASE_df, 'MySQL')
-else:
-    ax1.text(0.5, 0.5, 'MySQL: No data', ha='center', va='center', fontsize=14)
-    ax1.set_title('MySQL')
-
-if len(pg_df) > 0:
-    plot_db(ax2, pg_df, 'PostgreSQL')
-else:
-    ax2.text(0.5, 0.5, 'PostgreSQL: No data', ha='center', va='center', fontsize=14)
-    ax2.set_title('PostgreSQL')
+plot_db(ax1, mysql_df, 'MySQL')
+plot_db(ax2, pg_df, 'PostgreSQL')
 
 plt.suptitle('TQDBProxy Performance Benchmark - Higher is better', fontsize=14)
 plt.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -144,3 +140,4 @@ echo "Generated files:"
 echo "  - proxy_benchmark.csv"
 echo "  - proxy_benchmark.png"
 echo "============================================="
+

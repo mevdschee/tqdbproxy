@@ -11,6 +11,12 @@ A high-performance MySQL and PostgreSQL proxy with caching, read replica, metric
 - **Transaction Support**: Full BEGIN/COMMIT/ROLLBACK support
 - **Interactive Mode**: Full MySQL client support without restrictions
 
+## Performance
+
+![TQDBProxy Benchmark](benchmarks/proxy/proxy_benchmark.png)
+
+Cache hits are as fast as empty queries with 100 connections. Proxy overhead is minimal for queries ≥1ms.
+
 ## Quick Start
 
 ```bash
