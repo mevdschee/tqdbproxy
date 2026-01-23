@@ -1,6 +1,6 @@
 # TQDBProxy
 
-A high-performance MySQL and PostgreSQL proxy with query caching, metrics, and full transaction support.
+A high-performance MySQL and PostgreSQL proxy with caching, read replica, metrics, and transaction support.
 
 ## Features
 
