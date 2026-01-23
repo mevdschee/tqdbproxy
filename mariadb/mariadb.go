@@ -655,7 +655,6 @@ func (c *clientConn) forwardClientAuth() error {
 	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(c.rawAuthPkt)))
 	packet[3] = c.backendSeq
 	copy(packet[4:], c.rawAuthPkt)
-	log.Printf("[MariaDB] forwardClientAuth: user=%s db=%s backendSeq=%d fullPacketHex=%x", c.user, c.db, c.backendSeq, packet)
 	_, err := c.backend.Write(packet)
 	return err
 }
@@ -670,7 +669,6 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 	// Reset backend sequence for new command
 	c.backendSeq = 255 // Will wrap to 0 on first write
 
-	log.Printf("[MariaDB] execBackendQuery: sending query to backend (len=%d)", len(query))
 	if err := c.writeBackendPacket(payload); err != nil {
 		return nil, err
 	}
@@ -679,13 +677,10 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 	var response []byte
 	eofCount := 0
 	for {
-		log.Printf("[MariaDB] execBackendQuery: waiting for backend response packet")
 		packet, err := c.readBackendPacket()
 		if err != nil {
-			log.Printf("[MariaDB] execBackendQuery: error reading backend: %v", err)
 			return nil, err
 		}
-		log.Printf("[MariaDB] execBackendQuery: received packet len=%d first_byte=0x%02x", len(packet), packet[0])
 
 		// Add packet with header to response
 		header := make([]byte, 4)
@@ -707,7 +702,6 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 			case 0xFE: // EOF packet
 				if len(packet) < 9 {
 					eofCount++
-					log.Printf("[MariaDB] execBackendQuery: EOF packet #%d", eofCount)
 					// Result sets have 2 EOFs: after columns and after rows
 					if eofCount >= 2 {
 						return response, nil
