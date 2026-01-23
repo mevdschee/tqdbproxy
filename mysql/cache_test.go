@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"database/sql"
+	"fmt"
+	"math/rand"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -16,8 +18,12 @@ func TestCacheHit(t *testing.T) {
 	defer db.Close()
 
 	t.Run("VerifyCacheHitStatus", func(t *testing.T) {
+		// Use unique query to avoid cache collision from previous runs
+		uniqueID := rand.Int63()
+		query := fmt.Sprintf("/* ttl:60 */ SELECT %d", uniqueID)
+
 		// First query - cache miss
-		_, err := db.Exec("/* ttl:60 */ SELECT 1")
+		_, err := db.Exec(query)
 		if err != nil {
 			t.Fatalf("First query failed: %v", err)
 		}
@@ -45,8 +51,8 @@ func TestCacheHit(t *testing.T) {
 			t.Errorf("Expected Cache_hit=0 after first query, got %s", status["Cache_hit"])
 		}
 
-		// Second query - cache hit
-		_, err = db.Exec("/* ttl:60 */ SELECT 1")
+		// Second query - cache hit (same query)
+		_, err = db.Exec(query)
 		if err != nil {
 			t.Fatalf("Second query failed: %v", err)
 		}
