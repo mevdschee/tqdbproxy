@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -60,6 +61,12 @@ type Proxy struct {
 	listen      string
 	replicaPool *replica.Pool
 	cache       *cache.Cache
+}
+
+// connState tracks per-connection state for TQDB status
+type connState struct {
+	lastBackend  string
+	lastCacheHit bool
 }
 
 // New creates a new PostgreSQL proxy
@@ -227,6 +234,7 @@ func (p *Proxy) sendError(client net.Conn, code, message string) {
 }
 
 func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32) {
+	state := &connState{}
 	for {
 		msgType, payload, err := p.readMessage(client)
 		if err != nil {
@@ -238,7 +246,7 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32) {
 
 		switch msgType {
 		case msgQuery:
-			p.handleQuery(payload, client, db)
+			p.handleQuery(payload, client, db, state)
 		case msgTerminate:
 			return
 		default:
@@ -248,7 +256,7 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32) {
 	}
 }
 
-func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB) {
+func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *connState) {
 	start := time.Now()
 
 	// Query is null-terminated string
@@ -257,6 +265,14 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB) {
 		queryBytes = queryBytes[:len(queryBytes)-1]
 	}
 	query := string(queryBytes)
+
+	// Check for TQDB status query (PostgreSQL style: pg_tqdb_status)
+	queryUpper := strings.ToUpper(strings.TrimSpace(query))
+	if queryUpper == "SELECT * FROM PG_TQDB_STATUS" {
+		p.handleShowTQDBStatus(client, state)
+		return
+	}
+
 	parsed := parser.Parse(query)
 
 	file := parsed.File
@@ -275,6 +291,11 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB) {
 			metrics.CacheHits.WithLabelValues(file, line).Inc()
 			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
 			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+			// Track state
+			state.lastBackend = "cache"
+			state.lastCacheHit = true
+
 			if _, err := client.Write(cached); err != nil {
 				log.Printf("[PostgreSQL] Cache response error: %v", err)
 			}
@@ -329,6 +350,10 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB) {
 
 	// Send ReadyForQuery
 	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
+
+	// Track state
+	state.lastBackend = "primary"
+	state.lastCacheHit = false
 
 	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
@@ -452,4 +477,39 @@ func (p *Proxy) writeMessage(conn net.Conn, msgType byte, payload []byte) error 
 	}
 
 	return nil
+}
+
+func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
+	var response bytes.Buffer
+
+	// Prepare data
+	backend := state.lastBackend
+	if backend == "" {
+		backend = "none"
+	}
+	cacheHit := "0"
+	if state.lastCacheHit {
+		cacheHit = "1"
+	}
+
+	// Build result set with columns: variable_name, value
+	cols := []string{"variable_name", "value"}
+	response.Write(p.buildRowDescription(cols))
+
+	// Row 1: Backend
+	response.Write(p.buildDataRow([]interface{}{"Backend", backend}))
+
+	// Row 2: Cache_hit
+	response.Write(p.buildDataRow([]interface{}{"Cache_hit", cacheHit}))
+
+	// CommandComplete
+	cmdPayload := append([]byte("SELECT 2"), 0)
+	response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+
+	// ReadyForQuery
+	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
+
+	if _, err := client.Write(response.Bytes()); err != nil {
+		log.Printf("[PostgreSQL] TQDB status response error: %v", err)
+	}
 }

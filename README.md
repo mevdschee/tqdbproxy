@@ -50,10 +50,10 @@ All query types supported:
 
 ## Query Status Inspection
 
-Use the `SHOW TQDB STATUS` command to see which backend served the last query:
+Check which backend served the last query:
 
+**MySQL:**
 ```sql
-mysql> SELECT * FROM users WHERE id = 1;
 mysql> SHOW TQDB STATUS;
 +---------------+---------+
 | Variable_name | Value   |
@@ -61,17 +61,19 @@ mysql> SHOW TQDB STATUS;
 | Backend       | primary |
 | Cache_hit     | 0       |
 +---------------+---------+
-
-mysql> /* ttl:60 */ SELECT * FROM users WHERE id = 1;  -- Cache miss
-mysql> /* ttl:60 */ SELECT * FROM users WHERE id = 1;  -- Cache hit
-mysql> SHOW TQDB STATUS;
-+---------------+-------+
-| Variable_name | Value |
-+---------------+-------+
-| Backend       | cache |
-| Cache_hit     | 1     |
-+---------------+-------+
 ```
+
+**PostgreSQL:**
+```sql
+tqdbproxy=> SELECT * FROM pg_tqdb_status;
+ variable_name |  value  
+---------------+---------
+ Backend       | primary
+ Cache_hit     | 0
+(2 rows)
+```
+
+Values: `Backend` = `primary`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
 
 This is useful for debugging cache behavior during development.
 
