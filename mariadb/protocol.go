@@ -59,7 +59,7 @@ const (
 	SERVER_PS_OUT_PARAMS               = 0x1000
 )
 
-var ServerVersion = []byte("5.7.0-tqdbproxy")
+var ServerVersion = []byte("10.6.0-MariaDB-tqdbproxy")
 
 // GenerateSalt generates a 20-byte random salt for authentication
 func GenerateSalt() ([]byte, error) {

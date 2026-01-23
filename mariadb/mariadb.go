@@ -82,26 +82,25 @@ func (p *Proxy) Start() error {
 func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defer client.Close()
 
-	// Create dedicated backend connection for this client
-	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", p.replicaPool.GetPrimary())
-	db, err := sql.Open("mysql", dsn)
+	// Connect to backend FIRST to get its salt
+	backend, err := net.Dial("tcp", p.replicaPool.GetPrimary())
 	if err != nil {
 		log.Printf("[MariaDB] Failed to connect to backend for conn %d: %v", connID, err)
 		return
 	}
-	defer db.Close()
+	defer backend.Close()
 
 	conn := &clientConn{
 		conn:       client,
+		backend:    backend,
 		proxy:      p,
 		connID:     connID,
 		capability: 0,
 		status:     SERVER_STATUS_AUTOCOMMIT,
 		sequence:   0,
-		backendDB:  db, // Dedicated backend connection
 	}
 
-	// Perform handshake
+	// Perform handshake with salt forwarding
 	if err := conn.handshake(); err != nil {
 		log.Printf("[MariaDB] Handshake error (conn %d): %v", connID, err)
 		return
@@ -113,14 +112,18 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 
 type clientConn struct {
 	conn       net.Conn
+	backend    net.Conn // Raw TCP connection to backend
 	proxy      *Proxy
 	connID     uint32
 	capability uint32
 	status     uint16
 	sequence   byte
+	backendSeq byte // Sequence number for backend
 	salt       []byte
 	db         string
-	backendDB  *sql.DB // Dedicated backend connection
+	user       string // Client username
+	auth       []byte // Client auth response
+	rawAuthPkt []byte // Original client auth packet to forward
 
 	// Last query metadata for SHOW TQDB STATUS
 	lastQueryBackend  string
@@ -128,32 +131,116 @@ type clientConn struct {
 }
 
 func (c *clientConn) handshake() error {
-	// Generate salt
-	salt, err := GenerateSalt()
+	// Step 1: Read backend's greeting to get its salt
+	backendGreeting, err := c.readBackendPacket()
 	if err != nil {
-		return err
-	}
-	c.salt = salt
-
-	// Send server greeting
-	if err := c.writeServerGreeting(); err != nil {
-		return err
+		return fmt.Errorf("failed to read backend greeting: %v", err)
 	}
 
-	// Read client auth response
+	// Parse backend greeting to extract salt (for our internal use)
+	if len(backendGreeting) < 44 {
+		return fmt.Errorf("backend greeting too short")
+	}
+
+	// Skip protocol version (1 byte) and version string (null-terminated)
+	pos := 1
+	for pos < len(backendGreeting) && backendGreeting[pos] != 0 {
+		pos++
+	}
+	pos++ // skip null terminator
+
+	// Skip connection ID (4 bytes)
+	pos += 4
+
+	// Auth plugin data part 1 (8 bytes) = salt[0:8]
+	salt1 := backendGreeting[pos : pos+8]
+	pos += 8
+
+	// Skip filler (1 byte)
+	pos++
+
+	// Skip capability flags lower (2 bytes), charset (1), status (2), cap upper (2)
+	pos += 7
+
+	// Auth plugin data length (1 byte)
+	authDataLen := int(backendGreeting[pos])
+	pos++
+
+	// Skip reserved (10 bytes)
+	pos += 10
+
+	// Auth plugin data part 2 (remaining of 21 bytes)
+	var salt2 []byte
+	if authDataLen > 8 && pos+12 <= len(backendGreeting) {
+		salt2 = backendGreeting[pos : pos+12]
+	}
+
+	// Combine salt parts (for internal use)
+	c.salt = make([]byte, 20)
+	copy(c.salt[0:8], salt1)
+	if len(salt2) >= 12 {
+		copy(c.salt[8:20], salt2)
+	}
+
+	// Step 2: Forward the backend's greeting directly to the client
+	// This ensures client sees exact capabilities backend expects
+	greetingPacket := make([]byte, 4+len(backendGreeting))
+	binary.LittleEndian.PutUint32(greetingPacket[0:4], uint32(len(backendGreeting)))
+	greetingPacket[3] = c.sequence
+	copy(greetingPacket[4:], backendGreeting)
+	if _, err := c.conn.Write(greetingPacket); err != nil {
+		return err
+	}
+	c.sequence++
+
+	// Step 3: Read client auth response
 	if err := c.readClientAuth(); err != nil {
 		return err
 	}
 
-	// Send OK packet
+	// Step 4: Forward client auth to backend
+	if err := c.forwardClientAuth(); err != nil {
+		return err
+	}
+
+	// Step 5: Read backend's auth response
+	backendResponse, err := c.readBackendPacket()
+	if err != nil {
+		return fmt.Errorf("failed to read backend auth response: %v", err)
+	}
+
+	// Check if auth succeeded (OK packet starts with 0x00, Error with 0xFF)
+	if len(backendResponse) > 0 && backendResponse[0] == 0xFF {
+		// Forward error to client with proper packet header
+		c.sequence++
+		length := len(backendResponse)
+		packet := make([]byte, 4+length)
+		packet[0] = byte(length)
+		packet[1] = byte(length >> 8)
+		packet[2] = byte(length >> 16)
+		packet[3] = c.sequence
+		copy(packet[4:], backendResponse)
+		c.conn.Write(packet)
+		return fmt.Errorf("backend auth failed")
+	}
+
+	// Check for auth switch request (0xFE)
+	if len(backendResponse) > 0 && backendResponse[0] == 0xFE {
+		return fmt.Errorf("auth switch request not supported")
+	}
+
+	// Step 6: Forward OK response to client
 	c.sequence++
-	okPacket := WriteOKPacket(0, 0, c.status, c.capability)
+	okPacket := make([]byte, 4+len(backendResponse))
+	okPacket[0] = byte(len(backendResponse))
+	okPacket[1] = byte(len(backendResponse) >> 8)
+	okPacket[2] = byte(len(backendResponse) >> 16)
 	okPacket[3] = c.sequence
+	copy(okPacket[4:], backendResponse)
 	if _, err := c.conn.Write(okPacket); err != nil {
 		return err
 	}
 
-	// Don't reset here - let run() reset when it reads the next command
 	return nil
 }
 
@@ -245,25 +332,20 @@ func (c *clientConn) readClientAuth() error {
 	// Database name (if CLIENT_CONNECT_WITH_DB)
 	if c.capability&CLIENT_CONNECT_WITH_DB > 0 && pos < len(packet) {
 		c.db = string(packet[pos : pos+bytes.IndexByte(packet[pos:], 0)])
-		// Execute USE database on backend if database was specified
-		if c.db != "" {
-			_, err := c.backendDB.Exec(fmt.Sprintf("USE `%s`", c.db))
-			if err != nil {
-				return err
-			}
-		}
 	}
 
-	// For now, accept any authentication (no password check)
-	// In production, you would verify: CalcPassword(c.salt, []byte(password)) == auth
-	_ = user
-	_ = auth
+	// Store username and auth for backend connection
+	c.user = user
+	c.auth = auth
+	c.rawAuthPkt = packet // Store original packet for forwarding
 
 	return nil
 }
 
 func (c *clientConn) run() {
+	log.Printf("[MariaDB] run() started for conn %d, waiting for client commands", c.connID)
 	for {
+		log.Printf("[MariaDB] run() waiting for packet from client (conn %d)", c.connID)
 		packet, err := c.readPacket()
 		if err != nil {
 			if err != io.EOF {
@@ -271,6 +353,7 @@ func (c *clientConn) run() {
 			}
 			return
 		}
+		log.Printf("[MariaDB] run() received packet (conn %d): cmd=0x%02x len=%d", c.connID, packet[0], len(packet))
 
 		if len(packet) < 1 {
 			continue
@@ -298,7 +381,7 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 		dbName := string(data)
 		c.db = dbName
 		// Execute USE database on backend
-		_, err := c.backendDB.Exec(fmt.Sprintf("USE `%s`", dbName))
+		_, err := c.execBackendQuery(fmt.Sprintf("USE `%s`", dbName))
 		if err != nil {
 			return err
 		}
@@ -321,7 +404,7 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 }
 
 func (c *clientConn) handleBegin() error {
-	_, err := c.backendDB.Exec("BEGIN")
+	_, err := c.execBackendQuery("BEGIN")
 	if err != nil {
 		return err
 	}
@@ -330,7 +413,7 @@ func (c *clientConn) handleBegin() error {
 }
 
 func (c *clientConn) handleCommit() error {
-	_, err := c.backendDB.Exec("COMMIT")
+	_, err := c.execBackendQuery("COMMIT")
 	if err != nil {
 		return err
 	}
@@ -339,7 +422,7 @@ func (c *clientConn) handleCommit() error {
 }
 
 func (c *clientConn) handleRollback() error {
-	_, err := c.backendDB.Exec("ROLLBACK")
+	_, err := c.execBackendQuery("ROLLBACK")
 	if err != nil {
 		return err
 	}
@@ -398,38 +481,11 @@ func (c *clientConn) handleQuery(query string) error {
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
 	}
 
-	// For non-SELECT queries (INSERT, UPDATE, DELETE), use Exec instead of Query
-	if parsed.Type != parser.QuerySelect {
-		result, err := c.backendDB.Exec(parsed.Query)
-		if err != nil {
-			return err
-		}
-
-		affectedRows, _ := result.RowsAffected()
-		lastInsertId, _ := result.LastInsertId()
-
-		metrics.DatabaseQueries.WithLabelValues("primary").Inc()
-		metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
-		metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
-
-		// Track metadata for SHOW TQDB STATUS
-		c.lastQueryBackend = "primary"
-		c.lastQueryCacheHit = false
-
-		// Send OK packet with affected rows
-		c.sequence++
-		okPacket := WriteOKPacket(uint64(affectedRows), uint64(lastInsertId), c.status, c.capability)
-		okPacket[3] = c.sequence
-		_, err = c.conn.Write(okPacket)
-		return err
-	}
-
-	// Execute query on backend (use cleaned query without metadata)
-	rows, err := c.backendDB.Query(parsed.Query)
+	// Execute query on backend via raw socket
+	response, err := c.execBackendQuery(parsed.Query)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
@@ -439,18 +495,13 @@ func (c *clientConn) handleQuery(query string) error {
 	c.lastQueryBackend = "primary"
 	c.lastQueryCacheHit = false
 
-	// Build result set
-	result, err := c.buildResultSet(rows)
-	if err != nil {
-		return err
-	}
-
-	// Cache if cacheable
+	// Cache if cacheable (SELECT queries)
 	if parsed.IsCacheable() {
-		c.proxy.cache.Set(parsed.Query, result, time.Duration(parsed.TTL)*time.Second)
+		c.proxy.cache.Set(parsed.Query, response, time.Duration(parsed.TTL)*time.Second)
 	}
 
-	return c.writeRaw(result)
+	// Forward the response to client, adjusting sequence numbers
+	return c.forwardBackendResponse(response)
 }
 
 func (c *clientConn) handlePrepare(query string) error {
@@ -573,6 +624,127 @@ func (c *clientConn) readPacket() ([]byte, error) {
 	return payload, nil
 }
 
+func (c *clientConn) readBackendPacket() ([]byte, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(c.backend, header); err != nil {
+		return nil, err
+	}
+
+	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+	c.backendSeq = header[3]
+
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(c.backend, payload); err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}
+
+func (c *clientConn) writeBackendPacket(payload []byte) error {
+	c.backendSeq++
+	packet := make([]byte, 4+len(payload))
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(payload)))
+	packet[3] = c.backendSeq
+	copy(packet[4:], payload)
+	_, err := c.backend.Write(packet)
+	return err
+}
+
+func (c *clientConn) forwardClientAuth() error {
+	// Forward the original client auth packet directly to backend
+	c.backendSeq++
+	packet := make([]byte, 4+len(c.rawAuthPkt))
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(c.rawAuthPkt)))
+	packet[3] = c.backendSeq
+	copy(packet[4:], c.rawAuthPkt)
+	log.Printf("[MariaDB] forwardClientAuth: user=%s db=%s backendSeq=%d fullPacketHex=%x", c.user, c.db, c.backendSeq, packet)
+	_, err := c.backend.Write(packet)
+	return err
+}
+
+// execBackendQuery sends a query to backend and returns the full response
+func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
+	// Build COM_QUERY packet
+	payload := make([]byte, 1+len(query))
+	payload[0] = comQuery
+	copy(payload[1:], query)
+
+	// Reset backend sequence for new command
+	c.backendSeq = 255 // Will wrap to 0 on first write
+
+	log.Printf("[MariaDB] execBackendQuery: sending query to backend (len=%d)", len(query))
+	if err := c.writeBackendPacket(payload); err != nil {
+		return nil, err
+	}
+
+	// Read all response packets until we get an EOF or OK or Error
+	var response []byte
+	eofCount := 0
+	for {
+		log.Printf("[MariaDB] execBackendQuery: waiting for backend response packet")
+		packet, err := c.readBackendPacket()
+		if err != nil {
+			log.Printf("[MariaDB] execBackendQuery: error reading backend: %v", err)
+			return nil, err
+		}
+		log.Printf("[MariaDB] execBackendQuery: received packet len=%d first_byte=0x%02x", len(packet), packet[0])
+
+		// Add packet with header to response
+		header := make([]byte, 4)
+		binary.LittleEndian.PutUint32(header[0:4], uint32(len(packet)))
+		header[3] = c.backendSeq
+		response = append(response, header...)
+		response = append(response, packet...)
+
+		// Check packet type
+		if len(packet) > 0 {
+			switch packet[0] {
+			case 0x00: // OK packet (for non-SELECT queries)
+				// Only return on OK if we haven't seen column definitions
+				if eofCount == 0 {
+					return response, nil
+				}
+			case 0xFF: // Error packet
+				return response, nil
+			case 0xFE: // EOF packet
+				if len(packet) < 9 {
+					eofCount++
+					log.Printf("[MariaDB] execBackendQuery: EOF packet #%d", eofCount)
+					// Result sets have 2 EOFs: after columns and after rows
+					if eofCount >= 2 {
+						return response, nil
+					}
+				}
+			}
+		}
+	}
+}
+
+// forwardBackendResponse forwards a backend response to the client with adjusted sequence numbers
+func (c *clientConn) forwardBackendResponse(response []byte) error {
+	// Parse and rewrite sequence numbers in the response
+	pos := 0
+	for pos < len(response) {
+		if pos+4 > len(response) {
+			break
+		}
+
+		// Read packet length
+		length := int(uint32(response[pos]) | uint32(response[pos+1])<<8 | uint32(response[pos+2])<<16)
+
+		// Update sequence number
+		c.sequence++
+		response[pos+3] = c.sequence
+
+		// Move to next packet
+		pos += 4 + length
+	}
+
+	_, err := c.conn.Write(response)
+	return err
+}
+
 func (c *clientConn) writeOK() error {
 	return c.writeOKWithInfo("")
 }
@@ -588,6 +760,15 @@ func (c *clientConn) writeOKWithInfo(info string) error {
 func (c *clientConn) writeError(e error) error {
 	c.sequence++
 	packet := WriteErrorPacket(1105, "HY000", e.Error(), c.capability)
+	packet[3] = c.sequence
+	_, err := c.conn.Write(packet)
+	return err
+}
+
+func (c *clientConn) writeAuthError(user string) error {
+	c.sequence++
+	msg := fmt.Sprintf("Access denied for user '%s'@'localhost' (using password: YES)", user)
+	packet := WriteErrorPacket(1045, "28000", msg, c.capability)
 	packet[3] = c.sequence
 	_, err := c.conn.Write(packet)
 	return err
