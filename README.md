@@ -35,6 +35,8 @@ Add caller metadata to your queries for better observability:
 /* ttl:60 file:app.php line:42 */ SELECT * FROM users WHERE active = 1
 ```
 
+Queries with a TTL hint are routed to read replicas instead of the primary server.
+
 NB: When using the MariaDB CLI, you **must** use the `--comments` flag to preserve metadata comments
 
 ## Transaction Support
@@ -82,6 +84,20 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 Values: `Backend` = `primary`, `replicaN`, `cache`, or `none` (no query yet); `Cache_hit` = `0` or `1`.
 
 This is useful for debugging cache behavior during development.
+
+## Read Replicas
+
+Configure replicas in `config.ini`:
+
+```ini
+[mariadb]
+listen = :3307
+primary = 127.0.0.1:3306
+replica1 = 127.0.0.1:3316
+replica2 = 127.0.0.1:3326
+```
+
+Queries with a TTL hint are round-robin distributed across replicas.
 
 ## Metrics
 
