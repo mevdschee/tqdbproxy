@@ -35,8 +35,6 @@ Add caller metadata to your queries for better observability:
 /* ttl:60 file:app.php line:42 */ SELECT * FROM users WHERE active = 1
 ```
 
-Queries with a TTL hint are routed to read replicas instead of the primary server.
-
 NB: When using the MariaDB CLI, you **must** use the `--comments` flag to preserve metadata comments
 
 ## Transaction Support
