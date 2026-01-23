@@ -10,6 +10,23 @@ The `mysql` component implements the MySQL wire protocol, allowing TQDBProxy to 
   - Checks the cache for `SELECT` queries with a TTL hint.
   - Automatically caches results returned from the backend if the query is cacheable.
 - **Prepared Statements**: Tracks statement IDs and handles caching for executed prepared statements by combining the query template and parameters into a cache key.
+- **Transaction Support**: Full `BEGIN`, `COMMIT`, `ROLLBACK` support with cache bypass during transactions.
+
+## Query Status
+
+Use `SHOW TQDB STATUS` to see which backend served the last query:
+
+```sql
+mysql> SHOW TQDB STATUS;
++---------------+---------+
+| Variable_name | Value   |
++---------------+---------+
+| Backend       | primary |
+| Cache_hit     | 0       |
++---------------+---------+
+```
+
+Values: `Backend` = `primary`, `replicaN`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
 
 ## Metrics Integration
 
