@@ -143,7 +143,7 @@ The TQDBProxy server parses this hint and caches the query result for 60 seconds
 
 ## PostgreSQL-Specific Notes
 
-- PostgreSQL uses `$1`, `$2`, etc. for parameter placeholders (not `?` like MySQL)
+- PostgreSQL uses `$1`, `$2`, etc. for parameter placeholders (not `?` like MariaDB)
 - Make sure to connect through TQDBProxy port (default: 5433) not directly to PostgreSQL
 
 ## Testing
