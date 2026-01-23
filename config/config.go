@@ -15,7 +15,8 @@ type Config struct {
 
 // ProxyConfig holds configuration for a single protocol proxy
 type ProxyConfig struct {
-	Listen   string
+	Listen   string   // TCP listen address (e.g., ":3307")
+	Socket   string   // Optional Unix socket path
 	Primary  string   // Primary database address
 	Replicas []string // Read replica addresses
 }
@@ -55,6 +56,7 @@ func loadProxyConfig(cfg *ini.File, section, defaultListen, defaultPrimary strin
 	sec := cfg.Section(section)
 
 	listen := sec.Key("listen").MustString(defaultListen)
+	socket := sec.Key("socket").String() // Optional Unix socket path
 	primary := sec.Key("primary").MustString(defaultPrimary)
 
 	// Parse replicas (replica1, replica2, etc.)
@@ -69,6 +71,7 @@ func loadProxyConfig(cfg *ini.File, section, defaultListen, defaultPrimary strin
 
 	return ProxyConfig{
 		Listen:   listen,
+		Socket:   socket,
 		Primary:  primary,
 		Replicas: replicas,
 	}

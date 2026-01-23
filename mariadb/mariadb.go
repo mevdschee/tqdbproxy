@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ const (
 // Proxy implements a MariaDB server that forwards to backend
 type Proxy struct {
 	listen      string
+	socket      string // Optional Unix socket path
 	replicaPool *replica.Pool
 	cache       *cache.Cache
 	db          *sql.DB
@@ -39,9 +41,10 @@ type Proxy struct {
 }
 
 // New creates a new MariaDB proxy
-func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
+func New(listen, socket string, pool *replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
 		listen:      listen,
+		socket:      socket,
 		replicaPool: pool,
 		cache:       c,
 		connID:      1000,
@@ -58,25 +61,42 @@ func (p *Proxy) Start() error {
 	}
 	p.db = db
 
-	listener, err := net.Listen("tcp", p.listen)
+	// Start TCP listener
+	tcpListener, err := net.Listen("tcp", p.listen)
 	if err != nil {
 		return err
 	}
-	log.Printf("[MariaDB] Listening on %s, forwarding to %s", p.listen, p.replicaPool.GetPrimary())
+	log.Printf("[MariaDB] Listening on %s (tcp), forwarding to %s", p.listen, p.replicaPool.GetPrimary())
 
-	go func() {
-		for {
-			client, err := listener.Accept()
-			if err != nil {
-				log.Printf("[MariaDB] Accept error: %v", err)
-				continue
-			}
-			p.connID++
-			go p.handleConnection(client, p.connID)
+	go p.acceptLoop(tcpListener)
+
+	// Start Unix socket listener if configured
+	if p.socket != "" {
+		// Remove existing socket file if present
+		if err := os.Remove(p.socket); err != nil && !os.IsNotExist(err) {
+			log.Printf("[MariaDB] Warning: could not remove existing socket: %v", err)
 		}
-	}()
+		unixListener, err := net.Listen("unix", p.socket)
+		if err != nil {
+			return fmt.Errorf("failed to listen on unix socket: %v", err)
+		}
+		log.Printf("[MariaDB] Listening on %s (unix)", p.socket)
+		go p.acceptLoop(unixListener)
+	}
 
 	return nil
+}
+
+func (p *Proxy) acceptLoop(listener net.Listener) {
+	for {
+		client, err := listener.Accept()
+		if err != nil {
+			log.Printf("[MariaDB] Accept error: %v", err)
+			continue
+		}
+		p.connID++
+		go p.handleConnection(client, p.connID)
+	}
 }
 
 func (p *Proxy) handleConnection(client net.Conn, connID uint32) {

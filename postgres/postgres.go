@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -59,6 +60,7 @@ func queryTypeLabel(t parser.QueryType) string {
 // Proxy handles PostgreSQL protocol connections with caching
 type Proxy struct {
 	listen      string
+	socket      string // Optional Unix socket path
 	replicaPool *replica.Pool
 	cache       *cache.Cache
 }
@@ -70,9 +72,10 @@ type connState struct {
 }
 
 // New creates a new PostgreSQL proxy
-func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
+func New(listen, socket string, pool *replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
 		listen:      listen,
+		socket:      socket,
 		replicaPool: pool,
 		cache:       c,
 	}
@@ -80,25 +83,42 @@ func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
 
 // Start begins accepting PostgreSQL connections
 func (p *Proxy) Start() error {
-	listener, err := net.Listen("tcp", p.listen)
+	// Start TCP listener
+	tcpListener, err := net.Listen("tcp", p.listen)
 	if err != nil {
 		return err
 	}
-	log.Printf("[PostgreSQL] Listening on %s, forwarding to %s", p.listen, p.replicaPool.GetPrimary())
+	log.Printf("[PostgreSQL] Listening on %s (tcp), forwarding to %s", p.listen, p.replicaPool.GetPrimary())
 
-	go func() {
-		for {
-			client, err := listener.Accept()
-			if err != nil {
-				log.Printf("[PostgreSQL] Accept error: %v", err)
-				continue
-			}
-			connID := atomic.AddUint32(&connCounter, 1)
-			go p.handleConnection(client, connID)
+	go p.acceptLoop(tcpListener)
+
+	// Start Unix socket listener if configured
+	if p.socket != "" {
+		// Remove existing socket file if present
+		if err := os.Remove(p.socket); err != nil && !os.IsNotExist(err) {
+			log.Printf("[PostgreSQL] Warning: could not remove existing socket: %v", err)
 		}
-	}()
+		unixListener, err := net.Listen("unix", p.socket)
+		if err != nil {
+			return fmt.Errorf("failed to listen on unix socket: %v", err)
+		}
+		log.Printf("[PostgreSQL] Listening on %s (unix)", p.socket)
+		go p.acceptLoop(unixListener)
+	}
 
 	return nil
+}
+
+func (p *Proxy) acceptLoop(listener net.Listener) {
+	for {
+		client, err := listener.Accept()
+		if err != nil {
+			log.Printf("[PostgreSQL] Accept error: %v", err)
+			continue
+		}
+		connID := atomic.AddUint32(&connCounter, 1)
+		go p.handleConnection(client, connID)
+	}
 }
 
 func (p *Proxy) handleConnection(client net.Conn, connID uint32) {

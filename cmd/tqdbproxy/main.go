@@ -56,7 +56,7 @@ func main() {
 	go mariadbPool.StartHealthChecks(ctx, 10*time.Second)
 
 	// Start MariaDB proxy with replica pool
-	mariadbProxy := mariadb.New(cfg.MariaDB.Listen, mariadbPool, queryCache)
+	mariadbProxy := mariadb.New(cfg.MariaDB.Listen, cfg.MariaDB.Socket, mariadbPool, queryCache)
 	if err := mariadbProxy.Start(); err != nil {
 		log.Fatalf("Failed to start MariaDB proxy: %v", err)
 	}
@@ -66,7 +66,7 @@ func main() {
 	log.Printf("[PostgreSQL] Primary: %s, Replicas: %v", cfg.Postgres.Primary, cfg.Postgres.Replicas)
 
 	// Start PostgreSQL proxy with replica pool and caching
-	pgProxy := postgres.New(cfg.Postgres.Listen, pgPool, queryCache)
+	pgProxy := postgres.New(cfg.Postgres.Listen, cfg.Postgres.Socket, pgPool, queryCache)
 	if err := pgProxy.Start(); err != nil {
 		log.Fatalf("Failed to start PostgreSQL proxy: %v", err)
 	}

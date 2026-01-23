@@ -28,6 +28,27 @@ mariadb> SHOW TQDB STATUS;
 
 Values: `Backend` = `primary`, `replicaN`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
 
+## Unix Socket Support
+
+The MariaDB proxy can listen on both TCP and a Unix socket simultaneously. Use the `socket` option to specify a Unix socket path:
+
+```ini
+[mariadb]
+listen = :3307
+socket = /var/run/tqdbproxy/mysql.sock
+primary = 127.0.0.1:3306
+```
+
+Connect via TCP or Unix socket:
+
+```bash
+# TCP
+mariadb -u tqdbproxy -p -P 3307 tqdbproxy --comments
+
+# Unix socket
+mariadb -u tqdbproxy -p -S /var/run/tqdbproxy/mysql.sock tqdbproxy --comments
+```
+
 ## Metrics Integration
 
 The MariaDB component records detailed metrics for every query, including latency and cache status, labeled with source file and line number information extracted from SQL hints.

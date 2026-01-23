@@ -26,6 +26,27 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 
 Values: `Backend` = `primary`, `replicaN`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
 
+## Unix Socket Support
+
+The PostgreSQL proxy can listen on both TCP and a Unix socket simultaneously. Use the `socket` option to specify a Unix socket path:
+
+```ini
+[postgres]
+listen = :5433
+socket = /var/run/tqdbproxy/.s.PGSQL.5433
+primary = 127.0.0.1:5432
+```
+
+Connect via TCP or Unix socket:
+
+```bash
+# TCP
+psql -h 127.0.0.1 -p 5433 -U tqdbproxy -d tqdbproxy
+
+# Unix socket
+psql -h /var/run/tqdbproxy -p 5433 -U tqdbproxy -d tqdbproxy
+```
+
 ## Metrics Integration
 
 The PostgreSQL component records detailed metrics for every query, including latency and cache status, labeled with source file and line number information extracted from SQL hints.
