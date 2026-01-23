@@ -11,7 +11,7 @@ import (
 
 // TestConcurrentConnections tests the proxy under concurrent load
 func TestConcurrentConnections(t *testing.T) {
-	dsn := "php-crud-api:php-crud-api@tcp(127.0.0.1:3307)/php-crud-api"
+	dsn := "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy"
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Skipf("Failed to connect to proxy: %v", err)
@@ -65,7 +65,7 @@ func TestConcurrentConnections(t *testing.T) {
 
 // TestConcurrentTransactions tests concurrent transaction handling
 func TestConcurrentTransactions(t *testing.T) {
-	dsn := "php-crud-api:php-crud-api@tcp(127.0.0.1:3307)/php-crud-api"
+	dsn := "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy"
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Skipf("Failed to connect to proxy: %v", err)

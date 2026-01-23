@@ -17,7 +17,7 @@ func main() {
 	user := flag.String("user", "tqdbproxy", "Database user")
 	pass := flag.String("pass", "tqdbproxy", "Database password")
 	db := flag.String("db", "tqdbproxy", "Database name")
-	connections := flag.Int("c", 10, "Number of concurrent connections")
+	connections := flag.Int("c", 100, "Number of concurrent connections")
 	duration := flag.Int("t", 3, "Test duration in seconds")
 	csvFile := flag.String("csv", "", "Write CSV output to file")
 	flag.Parse()

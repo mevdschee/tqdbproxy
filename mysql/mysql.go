@@ -50,8 +50,8 @@ func New(listen string, pool *replica.Pool, c *cache.Cache) *Proxy {
 
 // Start begins accepting MySQL connections
 func (p *Proxy) Start() error {
-	// Connect to backend MySQL (using php-crud-api credentials for testing)
-	dsn := fmt.Sprintf("php-crud-api:php-crud-api@tcp(%s)/", p.replicaPool.GetPrimary())
+	// Connect to backend MySQL (using tqdbproxy credentials for testing)
+	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", p.replicaPool.GetPrimary())
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to connect to backend: %v", err)
@@ -83,7 +83,7 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defer client.Close()
 
 	// Create dedicated backend connection for this client
-	dsn := fmt.Sprintf("php-crud-api:php-crud-api@tcp(%s)/", p.replicaPool.GetPrimary())
+	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", p.replicaPool.GetPrimary())
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Printf("[MySQL] Failed to connect to backend for conn %d: %v", connID, err)

@@ -8,10 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Configuration - set your database credentials here
-DATABASE_USER="${DATABASE_USER:-php-crud-api}"
-DATABASE_PASS="${DATABASE_PASS:-php-crud-api}"
-DATABASE_NAME="${DATABASE_NAME:-php-crud-api}"
-CONNECTIONS="${CONNECTIONS:-10}"
+DATABASE_USER="${DATABASE_USER:-tqdbproxy}"
+DATABASE_PASS="${DATABASE_PASS:-tqdbproxy}"
+DATABASE_NAME="${DATABASE_NAME:-tqdbproxy}"
+CONNECTIONS="${CONNECTIONS:-100}"
 DURATION="${DURATION:-3}"
 
 # Cleanup function

@@ -10,7 +10,7 @@ import (
 
 func TestTransactions(t *testing.T) {
 	// Connect to the proxy
-	db, err := sql.Open("mysql", "php-crud-api:php-crud-api@tcp(127.0.0.1:3307)/php-crud-api")
+	db, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
 	if err != nil {
 		t.Fatalf("Failed to connect to proxy: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestTransactions(t *testing.T) {
 
 func TestTransactionWithCache(t *testing.T) {
 	// Connect to the proxy
-	db, err := sql.Open("mysql", "php-crud-api:php-crud-api@tcp(127.0.0.1:3307)/php-crud-api")
+	db, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
 	if err != nil {
 		t.Fatalf("Failed to connect to proxy: %v", err)
 	}

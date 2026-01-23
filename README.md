@@ -18,7 +18,7 @@ A high-performance MySQL and PostgreSQL proxy with query caching, metrics, and f
 ./tqdbproxy
 
 # Connect via MySQL client (interactive mode)
-mysql -u php-crud-api -p -P 3307 php-crud-api --comments
+mysql -u tqdbproxy -p -P 3307 tqdbproxy --comments
 ```
 
 ## Using Metadata Comments
