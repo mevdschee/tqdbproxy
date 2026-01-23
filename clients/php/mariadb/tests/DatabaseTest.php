@@ -1,9 +1,9 @@
 <?php
 
-namespace TQDBProxy\MySQL\Tests;
+namespace TQDBProxy\MariaDB\Tests;
 
 use PHPUnit\Framework\TestCase;
-use TQDBProxy\MySQL\Database;
+use TQDBProxy\MariaDB\Database;
 use PDO;
 
 class DatabaseTest extends TestCase
