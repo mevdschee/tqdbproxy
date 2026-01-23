@@ -1,2 +1,3 @@
-# Connections: 100
+# Connections: 10
 Database,QueryType,SleepMs,DirectRPS,ProxyRPS,CacheRPS
+MySQL,SLEEP(0),0.0,267989,109985,237827
