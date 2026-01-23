@@ -135,11 +135,31 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 		database = user
 	}
 
-	// Connect to backend using database/sql
-	dsn := fmt.Sprintf("host=%s port=5432 user=%s password=%s dbname=%s sslmode=disable",
-		"127.0.0.1", user, user, database) // Use user as password for simplicity
+	// Request cleartext password from client (AuthenticationCleartextPassword)
+	p.writeMessage(client, msgAuthentication, []byte{0, 0, 0, 3})
 
-	// Try common password patterns
+	// Read password message from client
+	msgType, payload, err := p.readMessage(client)
+	if err != nil {
+		log.Printf("[PostgreSQL] Password read error (conn %d): %v", connID, err)
+		return
+	}
+	if msgType != 'p' {
+		log.Printf("[PostgreSQL] Expected password message, got %c (conn %d)", msgType, connID)
+		p.sendError(client, "08P01", "expected password message")
+		return
+	}
+
+	// Password is null-terminated
+	password := string(payload)
+	if len(password) > 0 && password[len(password)-1] == 0 {
+		password = password[:len(password)-1]
+	}
+
+	// Connect to backend using the client's credentials
+	dsn := fmt.Sprintf("host=%s port=5432 user=%s password=%s dbname=%s sslmode=disable",
+		"127.0.0.1", user, password, database)
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Printf("[PostgreSQL] Backend connection error (conn %d): %v", connID, err)
@@ -150,7 +170,12 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 
 	if err := db.Ping(); err != nil {
 		log.Printf("[PostgreSQL] Backend ping error (conn %d): %v", connID, err)
-		p.sendError(client, "28P01", fmt.Sprintf("authentication failed: %v", err))
+		// Strip "pq: " prefix from error message to match native PostgreSQL
+		errMsg := err.Error()
+		if strings.HasPrefix(errMsg, "pq: ") {
+			errMsg = errMsg[4:]
+		}
+		p.sendFatalError(client, "28P01", errMsg)
 		return
 	}
 
@@ -219,9 +244,17 @@ func (p *Proxy) sendParameterStatus(client net.Conn, name, value string) {
 }
 
 func (p *Proxy) sendError(client net.Conn, code, message string) {
+	p.sendErrorWithSeverity(client, "ERROR", code, message)
+}
+
+func (p *Proxy) sendFatalError(client net.Conn, code, message string) {
+	p.sendErrorWithSeverity(client, "FATAL", code, message)
+}
+
+func (p *Proxy) sendErrorWithSeverity(client net.Conn, severity, code, message string) {
 	var payload bytes.Buffer
 	payload.WriteByte('S') // Severity
-	payload.WriteString("ERROR")
+	payload.WriteString(severity)
 	payload.WriteByte(0)
 	payload.WriteByte('C') // Code
 	payload.WriteString(code)
