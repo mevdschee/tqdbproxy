@@ -95,7 +95,7 @@ replica1 = 127.0.0.2:3306
 replica2 = 127.0.0.3:3306
 ```
 
-Queries with a TTL hint are round-robin distributed across replicas.
+Select queries with a TTL hint are round-robin distributed across replicas.
 
 ## Metrics
 
