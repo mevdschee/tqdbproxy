@@ -97,6 +97,10 @@ replica2 = 127.0.0.3:3306
 
 Select queries with a TTL hint are round-robin distributed across replicas.
 
+## Thundering Herd Protection
+
+The proxy implements single-flight for warmup and resfresh to prevent concurrent DB queries for the same key.
+
 ## Metrics
 
 Access Prometheus metrics at `http://localhost:9090/metrics`:
