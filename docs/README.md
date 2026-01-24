@@ -4,6 +4,7 @@ Welcome to the TQDBProxy documentation. TQDBProxy is a unified data layer that s
 
 ## Index
 
+- [Configuration](configuration/README.md)
 - System Components
   - [Cache](components/cache/README.md)
   - [Metrics](components/metrics/README.md)

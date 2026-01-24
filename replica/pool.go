@@ -34,6 +34,35 @@ func NewPool(primary string, replicas []string) *Pool {
 	return p
 }
 
+// UpdateReplicas updates the replica list for hot config reload.
+// Existing healthy replicas keep their health status.
+func (p *Pool) UpdateReplicas(primary string, replicas []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.primary = primary
+
+	// Build new healthy map, preserving status of existing replicas
+	newHealthy := make(map[string]bool)
+	for _, r := range replicas {
+		if status, exists := p.healthy[r]; exists {
+			newHealthy[r] = status
+		} else {
+			newHealthy[r] = true // New replicas start as healthy
+		}
+	}
+
+	p.replicas = replicas
+	p.healthy = newHealthy
+
+	// Reset round-robin index if it's now out of bounds
+	if len(replicas) > 0 {
+		p.current = p.current % len(replicas)
+	} else {
+		p.current = 0
+	}
+}
+
 // GetPrimary returns the primary database address
 func (p *Pool) GetPrimary() string {
 	return p.primary
