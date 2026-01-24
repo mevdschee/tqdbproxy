@@ -208,7 +208,7 @@ kill -SIGHUP $(pidof tqdbproxy)
 
 - Cache hits as fast as empty queries
 - Minimal proxy overhead for queries ≥1ms
-- 100 concurrent connections supported
+- Run multiple proxies, one per application server
 
 ---
 
@@ -223,9 +223,10 @@ kill -SIGHUP $(pidof tqdbproxy)
 
 ### Database Sharding
 
-- Route queries to appropriate primary based on selected database
-- Support multiple primaries with per-database configuration
-- Transparent to application layer
+- You may support multiple primaries
+- Each primary can handle a subset of databases
+- The proxy will route queries to the right primary
+- You can use the same client libraries as before
 
 ---
 
