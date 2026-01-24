@@ -2,6 +2,8 @@
 
 A high-performance MariaDB and PostgreSQL proxy with caching, read replica, metrics, and transaction support.
 
+Blog post: https://www.tqdev.com/2026-tqdbproxy-mariadb-postgresql-proxy/
+
 ## Features
 
 - **Query Caching**: Cache SELECT queries with configurable TTL and thundering herd protection
