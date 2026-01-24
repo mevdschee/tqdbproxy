@@ -9,6 +9,8 @@ The `postgres` component implements the PostgreSQL wire protocol, allowing TQDBP
 - **Caching Integration**:
   - Checks the cache for `SELECT` queries with a TTL hint.
   - Automatically caches results returned from the backend if the query is cacheable.
+  - **Thundering Herd Protection**: Serves stale data while refreshing in background.
+  - **Cold Cache Single-Flight**: Prevents concurrent DB queries for the same uncached key.
 - **Backend Connection**: Uses Go's `database/sql` with `lib/pq` driver for backend connections.
 
 ## Query Status

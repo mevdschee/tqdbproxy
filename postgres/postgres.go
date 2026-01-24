@@ -338,14 +338,20 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	}
 	queryType := queryTypeLabel(parsed.Type)
 
-	// Check cache
+	// Check cache with thundering herd protection
 	if parsed.IsCacheable() {
-		if cached, ok := p.cache.Get(parsed.Query); ok {
+		cached, flags, ok := p.cache.Get(parsed.Query)
+		if ok {
+			// Handle stale data with background refresh
+			if flags == cache.FlagRefresh {
+				// First stale access - trigger background refresh
+				go p.refreshQueryInBackground(parsed.Query, db)
+			}
+			// Serve from cache (fresh or stale)
 			metrics.CacheHits.WithLabelValues(file, line).Inc()
 			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
 			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
-			// Track state
 			state.lastBackend = "cache"
 			state.lastCacheHit = true
 
@@ -355,6 +361,20 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 			return
 		}
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
+
+		// Cold cache: use single-flight pattern
+		cached, _, ok, waited := p.cache.GetOrWait(parsed.Query)
+		if waited && ok {
+			// Another goroutine fetched it for us
+			metrics.CacheHits.WithLabelValues(file, line).Inc()
+			state.lastBackend = "cache"
+			state.lastCacheHit = true
+			if _, err := client.Write(cached); err != nil {
+				log.Printf("[PostgreSQL] Cache response error: %v", err)
+			}
+			return
+		}
+		// We need to fetch from DB (either first request or waited but still miss)
 	}
 
 	// Execute query
@@ -362,6 +382,10 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 
 	rows, err := db.Query(parsed.Query)
 	if err != nil {
+		// Cancel inflight if we were the first request
+		if parsed.IsCacheable() {
+			p.cache.CancelInflight(parsed.Query)
+		}
 		// Send error response
 		p.sendError(client, "42000", err.Error())
 		p.writeMessage(client, msgReadyForQuery, []byte{'I'})
@@ -412,15 +436,54 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
 	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
-	// Cache response if cacheable
+	// Cache response if cacheable - use SetAndNotify for single-flight
 	if parsed.IsCacheable() {
-		p.cache.Set(parsed.Query, response.Bytes(), time.Duration(parsed.TTL)*time.Second)
+		p.cache.SetAndNotify(parsed.Query, response.Bytes(), time.Duration(parsed.TTL)*time.Second)
 	}
 
 	// Send response to client
 	if _, err := client.Write(response.Bytes()); err != nil {
 		log.Printf("[PostgreSQL] Client write error: %v", err)
 	}
+}
+
+// refreshQueryInBackground refreshes a stale cache entry.
+// Called when cache.FlagRefresh is returned (first stale access).
+func (p *Proxy) refreshQueryInBackground(query string, db *sql.DB) {
+	parsed := parser.Parse(query)
+	rows, err := db.Query(parsed.Query)
+	if err != nil {
+		log.Printf("[PostgreSQL] Background refresh failed for query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	// Build response
+	var response bytes.Buffer
+	cols, _ := rows.Columns()
+	if len(cols) > 0 {
+		response.Write(p.buildRowDescription(cols))
+
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		rowCount := 0
+		for rows.Next() {
+			rows.Scan(valuePtrs...)
+			response.Write(p.buildDataRow(values))
+			rowCount++
+		}
+
+		cmdPayload := append([]byte(fmt.Sprintf("SELECT %d", rowCount)), 0)
+		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+	}
+	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
+
+	// Update cache with fresh data
+	p.cache.Set(parsed.Query, response.Bytes(), time.Duration(parsed.TTL)*time.Second)
 }
 
 func (p *Proxy) buildRowDescription(cols []string) []byte {

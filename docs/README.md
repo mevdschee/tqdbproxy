@@ -19,7 +19,7 @@ Welcome to the TQDBProxy documentation. TQDBProxy is a unified data layer that s
 
 TQDBProxy is composed of several modular components:
 
-- **[Cache](components/cache/README.md)**: Manages in-memory storage using the Otter library.
+- **[Cache](components/cache/README.md)**: In-memory caching with thundering herd protection using TQMemory.
 - **[Metrics](components/metrics/README.md)**: Collects and exposes Prometheus-compatible metrics.
 - **[MariaDB](components/mariadb/README.md)**: Handles the MariaDB-specific wire protocol and query interception.
 - **[PostgreSQL](components/postgres/README.md)**: Handles the PostgreSQL-specific wire protocol and query interception.

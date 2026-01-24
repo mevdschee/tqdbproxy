@@ -1,18 +1,29 @@
 # Cache Component
 
-The `cache` component provides an in-memory caching layer for query results.
+The `cache` component provides an in-memory caching layer with **thundering herd protection**.
 
 ## Implementation Details
 
-- **Library**: It uses the [Otter](https://github.com/maypok86/otter) library, which is a high-performance, contention-free Java cache inspired Go cache.
-- **Variable TTL**: Supports per-entry TTL (Time-To-Live), allowing different queries to be cached for different durations.
-- **Storage**: Results are stored as raw byte arrays (`[]byte`), making it protocol-agnostic for storing database responses.
+- **Library**: Uses [TQMemory](https://github.com/mevdschee/tqmemory), a high-performance sharded cache with built-in soft-expiry support.
+- **Variable TTL**: Supports per-entry TTL with soft and hard expiry.
+- **Thundering Herd Protection**: Returns staleness flags (0=fresh, 1=stale, 3=needs-refresh) to enable single-flight refresh.
+- **Cold Cache Single-Flight**: Uses `sync.Map` with channels to prevent concurrent DB queries for the same key.
 
 ## Key Functions
 
-- `New(maxSize int)`: Initializes a new cache with a maximum number of entries.
-- `Get(key string)`: Retrieves a cached result.
-- `Set(key string, value []byte, ttl time.Duration)`: Stores a result with a specific TTL.
-- `Delete(key string)`: Manually removes an entry from the cache.
+- `New(cfg CacheConfig)`: Initializes a new cache with configuration.
+- `Get(key string) ([]byte, int, bool)`: Returns (value, flags, ok). Flags indicate freshness.
+- `GetOrWait(key string)`: For cold cache single-flight - waits if another goroutine is fetching.
+- `SetAndNotify(key, value, ttl)`: Stores result and notifies waiting goroutines.
+- `Set(key, value, ttl)`: Simple store for background refresh.
+- `Delete(key string)`: Removes an entry.
+
+## Staleness Flags
+
+| Flag | Constant      | Meaning                                    |
+|------|---------------|--------------------------------------------|
+| 0    | `FlagFresh`   | Value is fresh                             |
+| 1    | `FlagStale`   | Value is stale, refresh already in progress|
+| 3    | `FlagRefresh` | First stale access - caller should refresh |
 
 [Back to Index](../../README.md)

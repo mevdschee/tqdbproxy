@@ -40,8 +40,8 @@ func main() {
 		}
 	}()
 
-	// Initialize cache (10000 entries max)
-	queryCache, err := cache.New(10000)
+	// Initialize cache with thundering herd protection
+	queryCache, err := cache.New(cache.DefaultCacheConfig())
 	if err != nil {
 		log.Fatalf("Failed to create cache: %v", err)
 	}

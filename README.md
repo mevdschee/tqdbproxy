@@ -4,7 +4,7 @@ A high-performance MariaDB and PostgreSQL proxy with caching, read replica, metr
 
 ## Features
 
-- **Query Caching**: Cache SELECT queries with configurable TTL
+- **Query Caching**: Cache SELECT queries with configurable TTL and thundering herd protection
 - **Caller Metadata**: Track queries by source file and line number
 - **Metrics**: Prometheus metrics for cache hits/misses, query latency, and more
 - **Read Replica Support**: Automatic routing of SELECT queries to replicas

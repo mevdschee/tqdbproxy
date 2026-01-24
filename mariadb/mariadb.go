@@ -482,25 +482,46 @@ func (c *clientConn) handleQuery(query string) error {
 		return c.handleShowTQDBStatus()
 	}
 
-	// Check cache
+	// Check cache with thundering herd protection
 	if parsed.IsCacheable() {
-		if cached, ok := c.proxy.cache.Get(parsed.Query); ok {
+		cached, flags, ok := c.proxy.cache.Get(parsed.Query)
+		if ok {
+			// Handle stale data with background refresh
+			if flags == cache.FlagRefresh {
+				// First stale access - trigger background refresh
+				go c.refreshQueryInBackground(parsed.Query)
+			}
+			// Serve from cache (fresh or stale)
 			metrics.CacheHits.WithLabelValues(file, line).Inc()
 			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
 			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
-			// Track metadata for SHOW TQDB STATUS
 			c.lastQueryBackend = "cache"
 			c.lastQueryCacheHit = true
 
 			return c.writeRaw(cached)
 		}
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
+
+		// Cold cache: use single-flight pattern
+		cached, _, ok, waited := c.proxy.cache.GetOrWait(parsed.Query)
+		if waited && ok {
+			// Another goroutine fetched it for us
+			metrics.CacheHits.WithLabelValues(file, line).Inc()
+			c.lastQueryBackend = "cache"
+			c.lastQueryCacheHit = true
+			return c.writeRaw(cached)
+		}
+		// We need to fetch from DB (either first request or waited but still miss)
 	}
 
 	// Execute query on backend via raw socket
 	response, err := c.execBackendQuery(parsed.Query)
 	if err != nil {
+		// Cancel inflight if we were the first request
+		if parsed.IsCacheable() {
+			c.proxy.cache.CancelInflight(parsed.Query)
+		}
 		return err
 	}
 
@@ -512,9 +533,9 @@ func (c *clientConn) handleQuery(query string) error {
 	c.lastQueryBackend = "primary"
 	c.lastQueryCacheHit = false
 
-	// Cache if cacheable (SELECT queries)
+	// Cache if cacheable (SELECT queries) - use SetAndNotify for single-flight
 	if parsed.IsCacheable() {
-		c.proxy.cache.Set(parsed.Query, response, time.Duration(parsed.TTL)*time.Second)
+		c.proxy.cache.SetAndNotify(parsed.Query, response, time.Duration(parsed.TTL)*time.Second)
 	}
 
 	// Forward the response to client, adjusting sequence numbers
@@ -524,6 +545,19 @@ func (c *clientConn) handleQuery(query string) error {
 func (c *clientConn) handlePrepare(query string) error {
 	// For now, just return an error - prepared statements need more work
 	return fmt.Errorf("prepared statements not yet supported in server mode")
+}
+
+// refreshQueryInBackground refreshes a stale cache entry.
+// Called when cache.FlagRefresh is returned (first stale access).
+func (c *clientConn) refreshQueryInBackground(query string) {
+	parsed := parser.Parse(query)
+	response, err := c.execBackendQuery(parsed.Query)
+	if err != nil {
+		log.Printf("[MariaDB] Background refresh failed for query: %v", err)
+		return
+	}
+	// Update cache with fresh data
+	c.proxy.cache.Set(parsed.Query, response, time.Duration(parsed.TTL)*time.Second)
 }
 
 func (c *clientConn) handleExecute(data []byte) error {
