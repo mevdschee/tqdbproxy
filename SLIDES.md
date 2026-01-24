@@ -1,32 +1,16 @@
 # TQDBProxy
 
-### A High-Performance Database Proxy with Caching
+### High-Performance Proxy for MariaDB and PostgreSQL 
 
 ---
 
 ## What is TQDBProxy?
 
-A unified data layer between applications and databases
-
-- **Transparent proxy** for MariaDB and PostgreSQL
-- **Query caching** with configurable TTL
-- **Thundering herd protection**
-- **Read replica routing**
-- **Full transaction support**
-- **Prometheus metrics**
-
----
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| Query Caching | Cache SELECT queries with per-query TTL |
-| Caller Metadata | Track queries by source file and line |
-| Metrics | Prometheus-compatible monitoring |
-| Read Replicas | Automatic query routing to replicas |
-| Transactions | Full BEGIN/COMMIT/ROLLBACK support |
-| Interactive Mode | Full CLI client support |
+- Transparent proxy for **MariaDB** and **PostgreSQL**
+- Caches results for **Time To Live** seconds
+- Provides **single-flight** for cold and warm cache
+- Routes cacheable queries to **read replicas**
+- Metrics with query **source file + line number**
 
 ---
 
@@ -78,8 +62,8 @@ SELECT * FROM users WHERE active = 1
 ```
 
 - `ttl`: Cache duration in seconds
-- `file`: Source file for observability
-- `line`: Line number for debugging
+- `file`: Source file of the query
+- `line`: Line number of the query
 
 ---
 
@@ -110,7 +94,7 @@ replica2 = 127.0.0.3:3306
 ```
 
 - SELECT with `ttl > 0` → Round-robin across replicas
-- Writes → Always to primary
+- Writes, DDL, Transactions → Always to primary
 - Automatic failover if replicas unavailable
 
 ---
