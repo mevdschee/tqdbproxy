@@ -12,6 +12,7 @@ The `mariadb` component implements the MariaDB wire protocol, allowing TQDBProxy
   - **Thundering Herd Protection**: Serves stale data while refreshing in background.
   - **Cold Cache Single-Flight**: Prevents concurrent DB queries for the same uncached key.
 - **Prepared Statements**: Tracks statement IDs and handles caching for executed prepared statements by combining the query template and parameters into a cache key.
+- **Database Sharding**: Supports transparent mid-connection shard switching via `USE` statements or `COM_INIT_DB` packets, with automatic re-authentication.
 - **Transaction Support**: Full `BEGIN`, `COMMIT`, `ROLLBACK` support with cache bypass during transactions.
 
 ## Query Status
@@ -38,6 +39,9 @@ The MariaDB proxy can listen on both TCP and a Unix socket simultaneously. Use t
 [mariadb]
 listen = :3307
 socket = /var/run/tqdbproxy/mysql.sock
+default = main
+
+[mariadb.main]
 primary = 127.0.0.1:3306
 ```
 

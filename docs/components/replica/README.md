@@ -1,17 +1,19 @@
 # Replica Component
 
-The `replica` component manages pools of database connections, specifically handling the distribution of queries between a primary database and multiple read replicas.
+The `replica` component manages multiple backend pools, each containing a primary database and optional read replicas. It provides the core sharding and routing logic for the proxy.
 
 ## Features
 
-- **Pool Management**: Maintains a list of primary and replica addresses.
-- **Load Balancing**: Implements a Round-Robin strategy to distribute read queries across available replicas.
-- **Health Checks**: Periodically verifies the availability of replicas using TCP connection probes.
-- **Automatic Failover**: Transparently falls back to the primary database if no healthy replicas are available.
+- **Multi-Pool Management**: Supports multiple named backend pools as defined in the hierarchical configuration.
+- **Database Sharding**: Maps specific databases to different backend pools for horizontal scaling.
+- **Load Balancing**: Implements a Round-Robin strategy within each pool to distribute read queries across healthy replicas.
+- **Health Checks**: Periodically verifies the availability of all primary and replica backends using TCP or Unix connection probes.
+- **Automatic Failover**: Transparently falls back to the primary database within a pool if no healthy replicas are available.
 
 ## Routing Logic
 
-- **Primary**: All write operations (INSERT, UPDATE, DELETE) and non-cacheable SELECTs.
-- **Replicas**: Cacheable SELECT queries (those with a `ttl > 0` hint) can be routed to replicas to reduce primary load.
+- **Shard Routing**: Determines the correct backend pool based on the database name (at connection time for PostgreSQL, or dynamically for MariaDB).
+- **Primary**: All write operations (INSERT, UPDATE, DELETE) and non-cacheable SELECTs are routed to the pool's primary.
+- **Replicas**: Cacheable SELECT queries (those with a `ttl > 0` hint) are distributed across healthy replicas in the pool.
 
 [Back to Index](../../README.md)

@@ -11,6 +11,7 @@ The `postgres` component implements the PostgreSQL wire protocol, allowing TQDBP
   - Automatically caches results returned from the backend if the query is cacheable.
   - **Thundering Herd Protection**: Serves stale data while refreshing in background.
   - **Cold Cache Single-Flight**: Prevents concurrent DB queries for the same uncached key.
+- **Database Sharding**: Routes client connections to the correct shard based on the `database` parameter in the startup message.
 - **Backend Connection**: Uses Go's `database/sql` with `lib/pq` driver for backend connections.
 
 ## Query Status
@@ -36,6 +37,9 @@ The PostgreSQL proxy can listen on both TCP and a Unix socket simultaneously. Us
 [postgres]
 listen = :5433
 socket = /var/run/tqdbproxy/.s.PGSQL.5433
+default = main
+
+[postgres.main]
 primary = 127.0.0.1:5432
 ```
 
