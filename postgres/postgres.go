@@ -70,8 +70,14 @@ type Proxy struct {
 // connState tracks per-connection state for TQDB status
 type connState struct {
 	lastBackend  string
+	shard        string
 	lastCacheHit bool
 	pool         *replica.Pool
+	user         string
+	password     string
+	database     string
+	primaryDB    *sql.DB
+	replicaDBs   map[string]*sql.DB
 }
 
 // New creates a new PostgreSQL proxy
@@ -208,18 +214,7 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 
 	// Connect to backend using the client's credentials
 	addr := pool.GetPrimary()
-	dsn := fmt.Sprintf("host=%s port=5432 user=%s password=%s dbname=%s sslmode=disable",
-		"127.0.0.1", user, password, database)
-
-	if len(addr) > 5 && addr[:5] == "unix:" {
-		dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable",
-			addr[5:], user, password, database)
-	} else if h, p, err := net.SplitHostPort(addr); err == nil {
-		dsn = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-			h, p, user, password, database)
-	}
-
-	db, err := sql.Open("postgres", dsn)
+	db, err := p.connectToBackend(addr, user, password, database)
 	if err != nil {
 		log.Printf("[PostgreSQL] Backend connection error (conn %d): %v", connID, err)
 		p.sendError(client, "08006", fmt.Sprintf("cannot connect to backend: %v", err))
@@ -253,11 +248,36 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	binary.BigEndian.PutUint32(keyData[4:8], 12345)
 	p.writeMessage(client, msgBackendKeyData, keyData)
 
-	// Send ReadyForQuery
-	p.writeMessage(client, msgReadyForQuery, []byte{'I'})
+	// Handle messages
+	state := &connState{
+		shard:      backendName,
+		pool:       pool,
+		user:       user,
+		password:   password,
+		database:   database,
+		primaryDB:  db,
+		replicaDBs: make(map[string]*sql.DB),
+	}
+	defer func() {
+		for _, rdb := range state.replicaDBs {
+			rdb.Close()
+		}
+	}()
+	p.handleMessages(client, db, connID, state)
+}
 
-	// Handle commands
-	p.handleMessages(client, db, connID)
+func (p *Proxy) connectToBackend(addr, user, password, database string) (*sql.DB, error) {
+	dsn := fmt.Sprintf("host=%s port=5432 user=%s password=%s dbname=%s sslmode=disable",
+		"127.0.0.1", user, password, database)
+
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable",
+			addr[5:], user, password, database)
+	} else if h, prt, err := net.SplitHostPort(addr); err == nil {
+		dsn = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			h, prt, user, password, database)
+	}
+	return sql.Open("postgres", dsn)
 }
 
 func (p *Proxy) parseStartupParams(msg []byte) map[string]string {
@@ -325,8 +345,7 @@ func (p *Proxy) sendErrorWithSeverity(client net.Conn, severity, code, message s
 	p.writeMessage(client, msgErrorResponse, payload.Bytes())
 }
 
-func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32) {
-	state := &connState{}
+func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32, state *connState) {
 	for {
 		msgType, payload, err := p.readMessage(client)
 		if err != nil {
@@ -419,7 +438,31 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	// Execute query
 	var response bytes.Buffer
 
-	rows, err := db.Query(parsed.Query)
+	// Select backend
+	targetDB := state.primaryDB
+	backendName := "primary"
+
+	if parsed.IsCacheable() {
+		addr, name := state.pool.GetReplica()
+		if name != "primary" {
+			backendName = name
+			rdb := state.replicaDBs[addr]
+			if rdb == nil {
+				var err error
+				rdb, err = p.connectToBackend(addr, state.user, state.password, state.database)
+				if err != nil {
+					log.Printf("[PostgreSQL] Error connecting to replica %s: %v", addr, err)
+				} else {
+					state.replicaDBs[addr] = rdb
+				}
+			}
+			if rdb != nil {
+				targetDB = rdb
+			}
+		}
+	}
+
+	rows, err := targetDB.Query(parsed.Query)
 	if err != nil {
 		// Cancel inflight if we were the first request
 		if parsed.IsCacheable() {
@@ -468,10 +511,10 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
 
 	// Track state
-	state.lastBackend = "primary"
+	state.lastBackend = backendName
 	state.lastCacheHit = false
 
-	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
+	metrics.DatabaseQueries.WithLabelValues(backendName).Inc()
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
 	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
@@ -651,14 +694,17 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 	cols := []string{"variable_name", "value"}
 	response.Write(p.buildRowDescription(cols))
 
-	// Row 1: Backend
+	// Row 1: Shard
+	response.Write(p.buildDataRow([]interface{}{"Shard", state.shard}))
+
+	// Row 2: Backend
 	response.Write(p.buildDataRow([]interface{}{"Backend", backend}))
 
-	// Row 2: Cache_hit
+	// Row 3: Cache_hit
 	response.Write(p.buildDataRow([]interface{}{"Cache_hit", cacheHit}))
 
 	// CommandComplete
-	cmdPayload := append([]byte("SELECT 2"), 0)
+	cmdPayload := append([]byte("SELECT 3"), 0)
 	response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
 
 	// ReadyForQuery

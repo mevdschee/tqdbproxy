@@ -3,7 +3,6 @@ package config
 import (
 	"log"
 	"os"
-	"strconv"
 	"strings"
 
 	"gopkg.in/ini.v1"
@@ -76,7 +75,7 @@ func loadProxyConfig(cfg *ini.File, protocol, defaultListen string) ProxyConfig 
 			// Load primary and replicas
 			primary := s.Key("primary").String()
 
-			// Support both modern comma-separated replicas and legacy replica1, replica2...
+			// Support comma-separated replicas
 			var replicas []string
 			if s.HasKey("replicas") {
 				raw := s.Key("replicas").String()
@@ -86,22 +85,6 @@ func loadProxyConfig(cfg *ini.File, protocol, defaultListen string) ProxyConfig 
 						replicas = append(replicas, strings.TrimSpace(p))
 					}
 				}
-			} else {
-				// Legacy support for replicaN
-				for i := 1; i <= 10; i++ {
-					keyName := "replica" + strconv.Itoa(i)
-					replica := s.Key(keyName).String()
-					if replica != "" {
-						replicas = append(replicas, replica)
-					}
-				}
-			}
-
-			// If no primary is set, check if this is the legacy format [mariadb] section
-			// though we prefer the new [mariadb.main] format.
-			if primary == "" && protocol == name {
-				// This shouldn't happen with the prefix check but just in case
-				continue
 			}
 
 			if primary != "" {

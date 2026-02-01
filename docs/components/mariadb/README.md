@@ -24,6 +24,7 @@ mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 | Variable_name | Value   |
 +---------------+---------+
+| Shard         | main    |
 | Backend       | primary |
 | Cache_hit     | 0       |
 +---------------+---------+

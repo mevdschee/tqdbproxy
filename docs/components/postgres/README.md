@@ -22,9 +22,10 @@ Use `SELECT * FROM pg_tqdb_status` to see which backend served the last query:
 tqdbproxy=> SELECT * FROM pg_tqdb_status;
  variable_name |  value  
 ---------------+---------
+ Shard         | main
  Backend       | primary
  Cache_hit     | 0
-(2 rows)
+(3 rows)
 ```
 
 Values: `Backend` = `primary`, `replicaN`, `cache`, or `none`; `Cache_hit` = `0` or `1`.

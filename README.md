@@ -67,6 +67,7 @@ mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 | Variable_name | Value   |
 +---------------+---------+
+| Shard         | main    |
 | Backend       | primary |
 | Cache_hit     | 0       |
 +---------------+---------+
@@ -77,9 +78,10 @@ mariadb> SHOW TQDB STATUS;
 tqdbproxy=> SELECT * FROM pg_tqdb_status;
  variable_name |  value  
 ---------------+---------
+ Shard         | main
  Backend       | primary
  Cache_hit     | 0
-(2 rows)
+(3 rows)
 ```
 
 Values: `Backend` = `primary`, `replicaN`, `cache`, or `none` (no query yet); `Cache_hit` = `0` or `1`.

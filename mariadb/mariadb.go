@@ -150,6 +150,8 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 		conn:        client,
 		backend:     backend,
 		backendPool: defaultPool,
+		backendAddr: dialAddr,
+		backendName: "primary",
 		proxy:       p,
 		connID:      connID,
 		capability:  0,
@@ -183,8 +185,13 @@ type clientConn struct {
 	auth        []byte // Client auth response
 	rawAuthPkt  []byte // Original client auth packet to forward
 
+	// Backend connection state
+	backendAddr string
+	backendName string // "primary", "replicas[0]", etc.
+
 	// Last query metadata for SHOW TQDB STATUS
 	lastQueryBackend  string
+	lastQueryShard    string
 	lastQueryCacheHit bool
 }
 
@@ -250,6 +257,9 @@ func (c *clientConn) handshake() error {
 		return err
 	}
 	c.sequence++
+
+	// Initialize shard name for status
+	c.lastQueryShard = c.proxy.config.Default
 
 	// Step 3: Read client auth response
 	if err := c.readClientAuth(); err != nil {
@@ -430,25 +440,36 @@ func (c *clientConn) run() {
 
 func (c *clientConn) ensureBackend(db string) error {
 	c.proxy.mu.RLock()
-	backendName := c.proxy.config.DBMap[db]
-	if backendName == "" {
-		backendName = c.proxy.config.Default
+	shardName := c.proxy.config.DBMap[db]
+	if shardName == "" {
+		shardName = c.proxy.config.Default
 	}
-	targetPool := c.proxy.pools[backendName]
+	targetPool := c.proxy.pools[shardName]
 	c.proxy.mu.RUnlock()
 
 	if targetPool == nil {
 		return fmt.Errorf("no backend pool found for database %q", db)
 	}
 
+	c.lastQueryShard = shardName
+
 	if targetPool == c.backendPool {
 		return nil // Already on the right shard
 	}
 
-	log.Printf("[MariaDB] Switching backend for conn %d: %s -> %s (db: %s)", c.connID, c.backendPool.GetPrimary(), targetPool.GetPrimary(), db)
+	// When switching shards, we default to the primary of that shard
+	addr := targetPool.GetPrimary()
+	return c.ensureBackendConn(addr, "primary", targetPool)
+}
+
+func (c *clientConn) ensureBackendConn(addr string, name string, pool *replica.Pool) error {
+	if addr == c.backendAddr {
+		return nil // Already on the right connection
+	}
+
+	log.Printf("[MariaDB] Switching backend for conn %d: %s -> %s (%s)", c.connID, c.backendAddr, addr, name)
 
 	// Reconnect and re-authenticate
-	addr := targetPool.GetPrimary()
 	network := "tcp"
 	dialAddr := addr
 	if len(addr) > 5 && addr[:5] == "unix:" {
@@ -460,11 +481,6 @@ func (c *clientConn) ensureBackend(db string) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to new backend: %v", err)
 	}
-
-	// We need to perform the handshake with the new backend.
-	// NOTE: This usually fails with salt-forwarding because the new backend
-	// will have a different salt than what the client used.
-	// However, we attempt it by re-forwarding the original auth packet.
 
 	// Read greeting from new backend
 	header := make([]byte, 4)
@@ -510,7 +526,9 @@ func (c *clientConn) ensureBackend(db string) error {
 	// Switch successful
 	c.backend.Close()
 	c.backend = newBackend
-	c.backendPool = targetPool
+	c.backendPool = pool
+	c.backendAddr = addr
+	c.backendName = name
 	c.backendSeq = header[3]
 
 	return nil
@@ -657,6 +675,23 @@ func (c *clientConn) handleQuery(query string) error {
 		// We need to fetch from DB (either first request or waited but still miss)
 	}
 
+	// Select backend
+	backendAddr := c.backendPool.GetPrimary()
+	backendName := "primary"
+
+	if parsed.IsCacheable() && (c.status&SERVER_STATUS_IN_TRANS == 0) {
+		backendAddr, backendName = c.backendPool.GetReplica()
+	}
+
+	// Ensure we are connected to the right backend
+	if err := c.ensureBackendConn(backendAddr, backendName, c.backendPool); err != nil {
+		// Cancel inflight if we were the first request
+		if parsed.IsCacheable() {
+			c.proxy.cache.CancelInflight(parsed.Query)
+		}
+		return err
+	}
+
 	// Execute query on backend via raw socket
 	response, err := c.execBackendQuery(parsed.Query)
 	if err != nil {
@@ -667,12 +702,12 @@ func (c *clientConn) handleQuery(query string) error {
 		return err
 	}
 
-	metrics.DatabaseQueries.WithLabelValues("primary").Inc()
+	metrics.DatabaseQueries.WithLabelValues(backendName).Inc()
 	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
 	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
 	// Track metadata for SHOW TQDB STATUS
-	c.lastQueryBackend = "primary"
+	c.lastQueryBackend = backendName
 	c.lastQueryCacheHit = false
 
 	// Cache if cacheable (SELECT queries) - use SetAndNotify for single-flight
@@ -1057,7 +1092,20 @@ func (c *clientConn) handleShowTQDBStatus() error {
 	eofPacket[3] = c.sequence
 	result = append(result, eofPacket...)
 
-	// Row 1: Backend
+	// Row 1: Shard
+	shard := c.lastQueryShard
+	if shard == "" {
+		shard = c.proxy.config.Default
+	}
+	c.sequence++
+	packet = make([]byte, 4)
+	packet = append(packet, PutLengthEncodedString([]byte("Shard"))...)
+	packet = append(packet, PutLengthEncodedString([]byte(shard))...)
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
+	packet[3] = c.sequence
+	result = append(result, packet...)
+
+	// Row 2: Backend
 	c.sequence++
 	packet = make([]byte, 4)
 	packet = append(packet, PutLengthEncodedString([]byte("Backend"))...)

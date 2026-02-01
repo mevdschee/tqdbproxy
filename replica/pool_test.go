@@ -33,10 +33,10 @@ func TestGetReplicaRoundRobin(t *testing.T) {
 	pool := NewPool(primary, replicas)
 
 	// Should cycle through replicas in order
-	first := pool.GetReplica()
-	second := pool.GetReplica()
-	third := pool.GetReplica()
-	fourth := pool.GetReplica() // Should wrap back to first
+	first, name1 := pool.GetReplica()
+	second, name2 := pool.GetReplica()
+	third, name3 := pool.GetReplica()
+	fourth, name4 := pool.GetReplica() // Should wrap back to first
 
 	if first == second || second == third {
 		t.Error("Round-robin not working: got duplicate replicas in sequence")
@@ -44,6 +44,10 @@ func TestGetReplicaRoundRobin(t *testing.T) {
 
 	if first != fourth {
 		t.Errorf("Round-robin wrap failed: first=%s, fourth=%s", first, fourth)
+	}
+
+	if name1 != "replicas[0]" || name2 != "replicas[1]" || name3 != "replicas[2]" || name4 != "replicas[0]" {
+		t.Errorf("Incorrect replica names: %s, %s, %s, %s", name1, name2, name3, name4)
 	}
 }
 
@@ -58,9 +62,12 @@ func TestGetReplicaWithUnhealthy(t *testing.T) {
 
 	// Should only return the healthy replica
 	for i := 0; i < 5; i++ {
-		replica := pool.GetReplica()
+		replica, name := pool.GetReplica()
 		if replica == replicas[0] {
 			t.Errorf("Got unhealthy replica: %s", replica)
+		}
+		if name != "replica2" {
+			t.Errorf("Expected replica2, got %s", name)
 		}
 	}
 }
@@ -76,9 +83,12 @@ func TestGetReplicaAllUnhealthy(t *testing.T) {
 	pool.MarkUnhealthy(replicas[1])
 
 	// Should fall back to primary
-	replica := pool.GetReplica()
+	replica, name := pool.GetReplica()
 	if replica != primary {
 		t.Errorf("Expected primary %s when all replicas unhealthy, got %s", primary, replica)
+	}
+	if name != "primary" {
+		t.Errorf("Expected name 'primary', got '%s'", name)
 	}
 }
 
@@ -89,9 +99,12 @@ func TestGetReplicaNoReplicas(t *testing.T) {
 	pool := NewPool(primary, replicas)
 
 	// Should return primary when no replicas configured
-	replica := pool.GetReplica()
+	replica, name := pool.GetReplica()
 	if replica != primary {
 		t.Errorf("Expected primary %s when no replicas, got %s", primary, replica)
+	}
+	if name != "primary" {
+		t.Errorf("Expected name 'primary', got '%s'", name)
 	}
 }
 

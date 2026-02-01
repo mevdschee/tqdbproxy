@@ -2,6 +2,7 @@ package replica
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -69,30 +70,31 @@ func (p *Pool) GetPrimary() string {
 }
 
 // GetReplica returns the next healthy replica using round-robin,
-// or the primary if no replicas are healthy
-func (p *Pool) GetReplica() string {
+// or the primary if no replicas are healthy. It returns (address, name).
+func (p *Pool) GetReplica() (string, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if len(p.replicas) == 0 {
-		return p.primary
+		return p.primary, "primary"
 	}
 
 	// Try to find a healthy replica
 	attempts := 0
 	for attempts < len(p.replicas) {
-		replica := p.replicas[p.current]
+		idx := p.current
+		replica := p.replicas[idx]
 		p.current = (p.current + 1) % len(p.replicas)
 		attempts++
 
 		if p.healthy[replica] {
-			return replica
+			return replica, fmt.Sprintf("replica%d", idx+1)
 		}
 	}
 
 	// No healthy replicas, fall back to primary
 	log.Printf("[Replica] No healthy replicas available, using primary")
-	return p.primary
+	return p.primary, "primary"
 }
 
 // MarkUnhealthy marks a replica as unhealthy

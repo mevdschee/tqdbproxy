@@ -1,16 +1,13 @@
 # TQDBProxy
 
-### High-Performance Proxy for MariaDB and PostgreSQL 
-
 ---
 
-## What is TQDBProxy?
+**High-performance MariaDB and PostgreSQL proxy**
 
-- Transparent proxy for **MariaDB** and **PostgreSQL**
-- Caches results for **Time To Live** seconds
-- Provides **single-flight** for cold and warm cache
-- Routes cacheable queries to **read replicas**
-- Metrics with query **source file + line number**
+- **Caching**: Unified query caching with TQMemory
+- **Observability**: Metrics with source file and line info
+- **Scalability**: Read replica support and **Database Sharding**
+- **Reliability**: Single-flight thundering herd protection
 
 ---
 
@@ -34,21 +31,39 @@
        ┌─────────┴─────────┐
        │                   │
 ┌──────▼──────┐     ┌──────▼──────┐
-│   Primary   │     │  Replicas   │
-│   Database  │     │  1, 2, ...  │
+│   Shard A   │     │   Shard B   │
+│ (Prim+Repl) │     │ (Prim+Repl) │
 └─────────────┘     └─────────────┘
 ```
 
 ---
 
-## System Components
+## Sharding & Replicas
 
-- **Cache** — In-memory caching with TQMemory
-- **Metrics** — Prometheus-compatible metrics
-- **MariaDB** — Wire protocol implementation
-- **PostgreSQL** — Wire protocol implementation  
-- **Parser** — SQL hint extraction
-- **Replica** — Connection pool management
+Configure backends and database mappings in `config.ini`:
+
+```ini
+[mariadb]
+listen = :3307
+default = main
+
+[mariadb.main]
+primary = 127.0.0.1:3306
+replicas = 127.0.0.1:3307, 127.0.0.1:3308
+
+[mariadb.shard1]
+primary = 10.0.0.1:3309
+databases = logs
+```
+
+---
+
+## Dynamic Shard Switching
+
+- **MariaDB**: Transparently switches backends mid-connection when you issue `USE database` or a `COM_INIT_DB` packet.
+- **PostgreSQL**: Routes to the correct shard at connection-time based on the startup message.
+- **Unified Model**: Sharding is done at the **Database level** (not schemas).
+- **Credentials**: User credentials must be synced across shards (Proxy forwards them as-is).
 
 ---
 
@@ -62,46 +77,25 @@ SELECT * FROM users WHERE active = 1
 ```
 
 - `ttl`: Cache duration in seconds
-- `file`: Source file of the query
-- `line`: Line number of the query
+- `file`: Source file of the query (for metrics)
+- `line`: Line number of the query (for metrics)
 
 ---
 
 ## Thundering Herd Protection
 
-| Flag | Meaning |
-|------|---------|
-| 0 | Value is **fresh** |
-| 1 | Value is **stale**, refresh in progress |
-| 3 | First stale access — **caller should refresh** |
+**Cold Cache**: Single-flight prevents concurrent DB queries for the same key while the first result is being fetched.
 
-**Cold Cache**: Single-flight prevents concurrent DB queries for the same key
+**Warm Cache**: Stale data is served to most clients while one background goroutine refreshes the value.
 
-**Warm Cache**: Stale data served while one goroutine refreshes in background
-
----
-
-## Read Replica Routing
-
-Configure replicas in `config.ini`:
-
-```ini
-[mariadb]
-listen = :3307
-primary = 127.0.0.1:3306
-replica1 = 127.0.0.2:3306
-replica2 = 127.0.0.3:3306
-```
-
-- SELECT with `ttl > 0` → Round-robin across replicas
-- Writes, DDL, Transactions → Always to primary
-- Automatic failover if replicas unavailable
+- Prevents backend saturation during heavy traffic spikes.
+- Ensures consistent low latency for hits.
 
 ---
 
 ## Transaction Support
 
-Full ACID transaction support:
+Full ACID transaction support for both protocols:
 
 ```sql
 BEGIN;
@@ -110,10 +104,7 @@ UPDATE accounts SET balance = balance + 100 WHERE id = 2;
 COMMIT;
 ```
 
-- **SELECT** — With optional caching
-- **INSERT** — Returns last insert ID
-- **UPDATE** — Returns affected rows
-- **DELETE** — Returns affected rows
+Transactions automatically bypass the cache and pin the session to the **primary** backend.
 
 ---
 
@@ -129,27 +120,10 @@ SHOW TQDB STATUS;
 SELECT * FROM pg_tqdb_status;
 ```
 
-Returns `Backend` (primary/replicaN/cache/none) and `Cache_hit` (0/1)
-
----
-
-## Client Libraries
-
-Wrapper libraries for automatic hint injection:
-
-| Language | MariaDB | PostgreSQL |
-|----------|---------|------------|
-| Go | ✓ | ✓ |
-| PHP | ✓ | ✓ |
-| TypeScript | ✓ | ✓ |
-
-```go
-// Standard query
-rows, err := db.Query("SELECT * FROM users")
-
-// Query with 60-second caching
-rows, err := db.QueryWithTTL(60, "SELECT * FROM users")
-```
+Inspect your last query results:
+- `Shard`: (main / shard1 / ...)
+- `Backend`: (primary / replicas[0] / cache / none)
+- `Cache_hit`: (0 / 1)
 
 ---
 
@@ -157,86 +131,50 @@ rows, err := db.QueryWithTTL(60, "SELECT * FROM users")
 
 Exposed at `http://localhost:9090/metrics`:
 
-- `tqdbproxy_query_total` — Queries by type, file, line
-- `tqdbproxy_query_latency_seconds` — Execution time histogram
-- `tqdbproxy_cache_hits_total` — Cache hits
-- `tqdbproxy_cache_misses_total` — Cache misses
-- `tqdbproxy_database_queries_total` — Backend queries
+- `tqdbproxy_query_total`: Queries by type, file, and line
+- `tqdbproxy_query_latency_seconds`: Latency histograms
+- `tqdbproxy_cache_hits_total`: Hit counters
+- `tqdbproxy_database_queries_total`: Actual backend traffic
 
----
-
-## Configuration
-
-```ini
-[mariadb]
-listen = :3307
-socket = /var/run/tqdbproxy/mysql.sock
-primary = 127.0.0.1:3306
-
-[postgres]
-listen = :5433
-socket = /var/run/tqdbproxy/.s.PGSQL.5433
-primary = 127.0.0.1:5432
-```
-
-**Hot reload** via `SIGHUP`:
-```bash
-kill -SIGHUP $(pidof tqdbproxy)
-```
+Labels are enriched with the `file` and `line` metadata hints.
 
 ---
 
 ## Performance
 
-![Benchmark](benchmarks/proxy/proxy_benchmark.png)
-
-- Cache hits as fast as empty queries
-- Minimal proxy overhead for queries ≥1ms
-- Run multiple proxies, one per application server
-
----
-
-## Future Ideas
-
-### ACID-Compliant Dual Writes
-
-- Write to two databases simultaneously using XA transactions
-- Two-phase commit ensures atomicity across both databases
-- Enables zero-downtime migrations and geographic redundancy
-- Latency = max(primary, secondary), not sum
-
-### Database Sharding
-
-- You may support multiple primaries
-- Each primary can handle a subset of databases
-- The proxy will route queries to the right primary
-- You can use the same client libraries as before
+- **Zero-latency** cache hits (as fast as local query)
+- **Minimal overhead** for proxied queries (>1ms)
+- **High concurrency**: Handle thousands of client connections with small backend pools
+- **Hot Reload**: Send `SIGHUP` to refresh backend addresses without restart
 
 ---
 
 ## Quick Start
 
 ```bash
-# Start the proxy
+# 1. Start the proxy
 ./tqdbproxy
 
-# Connect via MariaDB
-mariadb -u tqdbproxy -p -P 3307 --comments
+# 2. Connect via MariaDB
+mariadb -h 127.0.0.1 -P 3307 -u user -p --comments
 
-# Connect via PostgreSQL  
-psql -h 127.0.0.1 -p 5433 -U tqdbproxy
+# 3. Connect via PostgreSQL
+psql -h 127.0.0.1 -p 5433 -U user -d database
 ```
 
 ---
 
-## Links
+## Demo
 
-- Blog: https://www.tqdev.com/2026-tqdbproxy-mariadb-postgresql-proxy/
-- Documentation: [docs/README.md](docs/README.md)
-- Cache library: [TQMemory](https://github.com/mevdschee/tqmemory)
+```bash
+mysql -u tqdbproxy tqdbproxy -p -P 3307 --comments
+```
 
----
+```sql
+/* ttl:60 */ select sleep(1);
+show tqdb status;
+```
 
-# Thank You
+**TQDBProxy** — Sharding, Caching, Reliability
 
-**TQDBProxy** — Fast, Observable, Reliable
+[https://github.com/mevdschee/tqdbproxy](https://github.com/mevdschee/tqdbproxy)
