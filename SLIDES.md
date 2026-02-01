@@ -167,12 +167,11 @@ psql -h 127.0.0.1 -p 5433 -U user -d database
 ## Demo
 
 ```bash
-mysql -u tqdbproxy tqdbproxy -p -P 3307 --comments
+mysql -u tqdbproxy tqdbproxy -ptqdbproxy -P 3307 --comments
 ```
 
 ```sql
-/* ttl:60 */ select sleep(1);
-show tqdb status;
+/* ttl:2 */ select sleep(1); show tqdb status;
 ```
 
 **TQDBProxy** — Sharding, Caching, Reliability

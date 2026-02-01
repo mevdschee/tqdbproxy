@@ -298,6 +298,18 @@ func (c *clientConn) handshake() error {
 	}
 
 	// Step 6: Forward OK response to client
+	if len(backendResponse) > 0 && backendResponse[0] == 0x00 {
+		// OK packet: 00 <lenenc_rows> <lenenc_id> <status_flags(2)>
+		statusOffset := 1
+		_, _, n1 := ReadLengthEncodedInt(backendResponse[statusOffset:])
+		statusOffset += n1
+		_, _, n2 := ReadLengthEncodedInt(backendResponse[statusOffset:])
+		statusOffset += n2
+		if len(backendResponse) >= statusOffset+2 {
+			c.status = binary.LittleEndian.Uint16(backendResponse[statusOffset:])
+		}
+	}
+
 	c.sequence++
 	okPacket := make([]byte, 4+len(backendResponse))
 	okPacket[0] = byte(len(backendResponse))
@@ -557,20 +569,7 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	case comPing:
 		return c.writeOK()
 	case comQuery:
-		query := string(data)
-		// Check for USE statement
-		queryUpper := strings.ToUpper(strings.TrimSpace(query))
-		if strings.HasPrefix(queryUpper, "USE ") {
-			parts := strings.Fields(query)
-			if len(parts) >= 2 {
-				dbName := strings.Trim(parts[1], "`;")
-				if err := c.ensureBackend(dbName); err != nil {
-					return err
-				}
-				c.db = dbName
-			}
-		}
-		return c.handleQuery(query)
+		return c.handleQuery(string(data))
 	case comStmtPrepare:
 		return c.handlePrepare(string(data))
 	case comStmtExecute:
@@ -580,66 +579,97 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	}
 }
 
-func (c *clientConn) handleBegin() error {
+func (c *clientConn) handleBegin(moreResults bool) error {
 	_, err := c.execBackendQuery("BEGIN")
 	if err != nil {
 		return err
 	}
 	c.status |= SERVER_STATUS_IN_TRANS
-	return c.writeOKWithInfo("")
+	return c.writeOKWithInfo("", moreResults)
 }
 
-func (c *clientConn) handleCommit() error {
+func (c *clientConn) handleCommit(moreResults bool) error {
 	_, err := c.execBackendQuery("COMMIT")
 	if err != nil {
 		return err
 	}
 	c.status &= ^uint16(SERVER_STATUS_IN_TRANS)
-	return c.writeOKWithInfo("")
+	return c.writeOKWithInfo("", moreResults)
 }
 
-func (c *clientConn) handleRollback() error {
+func (c *clientConn) handleRollback(moreResults bool) error {
 	_, err := c.execBackendQuery("ROLLBACK")
 	if err != nil {
 		return err
 	}
 	c.status &= ^uint16(SERVER_STATUS_IN_TRANS)
-	return c.writeOKWithInfo("")
+	return c.writeOKWithInfo("", moreResults)
 }
 
 func (c *clientConn) handleQuery(query string) error {
 	start := time.Now()
 	parsed := parser.Parse(query)
 
-	// Debug: log the query and parsed metadata (commented out for performance)
-	// log.Printf("[MariaDB] Raw query from client: %q", query)
-	// log.Printf("[MariaDB] Parsed - File: %q, Line: %d, TTL: %d, Clean query: %q", parsed.File, parsed.Line, parsed.TTL, parsed.Query)
+	// Split multi-statement queries
+	statements := splitQueries(parsed.Query)
+	for i, stmt := range statements {
+		moreResults := (i < len(statements)-1)
+		// Process each statement
+		if err := c.handleSingleQuery(stmt, parsed, start, moreResults); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.ParsedQuery, start time.Time, moreResults bool) error {
+	// Re-parse the single statement if it's different from the original
+	parsed := originalParsed
+	if query != originalParsed.Query {
+		parsed = parser.Parse(query)
+	}
 
 	file := parsed.File
 	if file == "" {
 		file = "unknown"
 	}
-	line := "0"
+	line := originalParsed.Line // Use line from original if available
 	if parsed.Line > 0 {
-		line = strconv.Itoa(parsed.Line)
+		line = parsed.Line
 	}
+	lineStr := strconv.Itoa(line)
 	queryType := queryTypeLabel(parsed.Type)
 
-	// Check for transaction commands
 	queryUpper := strings.ToUpper(strings.TrimSpace(parsed.Query))
+	queryUpper = strings.TrimSuffix(queryUpper, ";")
+
+	// Check for USE statement
+	if strings.HasPrefix(queryUpper, "USE ") {
+		parts := strings.Fields(parsed.Query)
+		if len(parts) >= 2 {
+			dbName := strings.Trim(parts[1], "`;")
+			if err := c.ensureBackend(dbName); err != nil {
+				return err
+			}
+			c.db = dbName
+			return c.writeOKWithInfo("", moreResults)
+		}
+	}
+
+	// Check for transaction commands
 	if queryUpper == "BEGIN" || queryUpper == "START TRANSACTION" {
-		return c.handleBegin()
+		return c.handleBegin(moreResults)
 	}
 	if queryUpper == "COMMIT" {
-		return c.handleCommit()
+		return c.handleCommit(moreResults)
 	}
 	if queryUpper == "ROLLBACK" {
-		return c.handleRollback()
+		return c.handleRollback(moreResults)
 	}
 
 	// Check for custom SHOW TQDB STATUS command
 	if queryUpper == "SHOW TQDB STATUS" {
-		return c.handleShowTQDBStatus()
+		return c.handleShowTQDBStatus(moreResults)
 	}
 
 	// Check cache with thundering herd protection
@@ -649,28 +679,32 @@ func (c *clientConn) handleQuery(query string) error {
 			// Handle stale data with background refresh
 			if flags == cache.FlagRefresh {
 				// First stale access - trigger background refresh
-				go c.refreshQueryInBackground(parsed.Query)
+				go c.refreshQueryInBackground(parsed.Query, parsed.TTL)
 			}
 			// Serve from cache (fresh or stale)
-			metrics.CacheHits.WithLabelValues(file, line).Inc()
-			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
-			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+			metrics.CacheHits.WithLabelValues(file, lineStr).Inc()
+			metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "true").Inc()
+			metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
 
-			c.lastQueryBackend = "cache"
+			backend := "cache"
+			if flags != cache.FlagFresh {
+				backend = "cache (stale)"
+			}
+			c.lastQueryBackend = backend
 			c.lastQueryCacheHit = true
 
-			return c.writeRaw(cached)
+			return c.forwardBackendResponse(cached, moreResults)
 		}
-		metrics.CacheMisses.WithLabelValues(file, line).Inc()
+		metrics.CacheMisses.WithLabelValues(file, lineStr).Inc()
 
 		// Cold cache: use single-flight pattern
 		cached, _, ok, waited := c.proxy.cache.GetOrWait(parsed.Query)
 		if waited && ok {
 			// Another goroutine fetched it for us
-			metrics.CacheHits.WithLabelValues(file, line).Inc()
+			metrics.CacheHits.WithLabelValues(file, lineStr).Inc()
 			c.lastQueryBackend = "cache"
 			c.lastQueryCacheHit = true
-			return c.writeRaw(cached)
+			return c.forwardBackendResponse(cached, moreResults)
 		}
 		// We need to fetch from DB (either first request or waited but still miss)
 	}
@@ -682,7 +716,6 @@ func (c *clientConn) handleQuery(query string) error {
 	if parsed.IsCacheable() && (c.status&SERVER_STATUS_IN_TRANS == 0) {
 		backendAddr, backendName = c.backendPool.GetReplica()
 	}
-
 	// Ensure we are connected to the right backend
 	if err := c.ensureBackendConn(backendAddr, backendName, c.backendPool); err != nil {
 		// Cancel inflight if we were the first request
@@ -703,8 +736,8 @@ func (c *clientConn) handleQuery(query string) error {
 	}
 
 	metrics.DatabaseQueries.WithLabelValues(backendName).Inc()
-	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
-	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+	metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "false").Inc()
+	metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
 
 	// Track metadata for SHOW TQDB STATUS
 	c.lastQueryBackend = backendName
@@ -716,7 +749,7 @@ func (c *clientConn) handleQuery(query string) error {
 	}
 
 	// Forward the response to client, adjusting sequence numbers
-	return c.forwardBackendResponse(response)
+	return c.forwardBackendResponse(response, moreResults)
 }
 
 func (c *clientConn) handlePrepare(query string) error {
@@ -726,15 +759,15 @@ func (c *clientConn) handlePrepare(query string) error {
 
 // refreshQueryInBackground refreshes a stale cache entry.
 // Called when cache.FlagRefresh is returned (first stale access).
-func (c *clientConn) refreshQueryInBackground(query string) {
+func (c *clientConn) refreshQueryInBackground(query string, ttl int) {
 	parsed := parser.Parse(query)
 	response, err := c.execBackendQuery(parsed.Query)
 	if err != nil {
 		log.Printf("[MariaDB] Background refresh failed for query: %v", err)
 		return
 	}
-	// Update cache with fresh data
-	c.proxy.cache.Set(parsed.Query, response, time.Duration(parsed.TTL)*time.Second)
+	// Update cache with fresh data - use the passed TTL
+	c.proxy.cache.Set(parsed.Query, response, time.Duration(ttl)*time.Second)
 }
 
 func (c *clientConn) handleExecute(data []byte) error {
@@ -923,9 +956,23 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 		// Check packet type
 		if len(packet) > 0 {
 			switch packet[0] {
-			case 0x00: // OK packet (for non-SELECT queries)
-				// Only return on OK if we haven't seen column definitions
+			case 0x00: // OK packet
+				// OK packet: 00 <lenenc_rows> <lenenc_id> <status_flags(2)>
 				if eofCount == 0 {
+					statusOffset := 1
+					_, _, n1 := ReadLengthEncodedInt(packet[statusOffset:])
+					statusOffset += n1
+					_, _, n2 := ReadLengthEncodedInt(packet[statusOffset:])
+					statusOffset += n2
+					if len(packet) >= statusOffset+2 {
+						status := binary.LittleEndian.Uint16(packet[statusOffset:])
+						if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+							return response, nil
+						}
+						// More results coming (e.g. from multi-statement call or procedure)
+						eofCount = 0
+						continue
+					}
 					return response, nil
 				}
 			case 0xFF: // Error packet
@@ -935,6 +982,16 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 					eofCount++
 					// Result sets have 2 EOFs: after columns and after rows
 					if eofCount >= 2 {
+						// EOF packet: FE <warnings(2)> <status_flags(2)>
+						if len(packet) >= 5 {
+							status := binary.LittleEndian.Uint16(packet[3:])
+							if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+								return response, nil
+							}
+							// More results coming
+							eofCount = 0
+							continue
+						}
 						return response, nil
 					}
 				}
@@ -944,36 +1001,74 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 }
 
 // forwardBackendResponse forwards a backend response to the client with adjusted sequence numbers
-func (c *clientConn) forwardBackendResponse(response []byte) error {
+func (c *clientConn) forwardBackendResponse(response []byte, moreResults bool) error {
+	// IMPORTANT: Do NOT mutate the input slice in place if it might be from the cache
+	respCopy := make([]byte, len(response))
+	copy(respCopy, response)
+
 	// Parse and rewrite sequence numbers in the response
 	pos := 0
-	for pos < len(response) {
-		if pos+4 > len(response) {
+	var lastPacketPos int
+	for pos < len(respCopy) {
+		if pos+4 > len(respCopy) {
 			break
 		}
 
 		// Read packet length
-		length := int(uint32(response[pos]) | uint32(response[pos+1])<<8 | uint32(response[pos+2])<<16)
+		length := int(uint32(respCopy[pos]) | uint32(respCopy[pos+1])<<8 | uint32(respCopy[pos+2])<<16)
 
 		// Update sequence number
 		c.sequence++
-		response[pos+3] = c.sequence
+		respCopy[pos+3] = c.sequence
 
+		lastPacketPos = pos
 		// Move to next packet
 		pos += 4 + length
 	}
 
-	_, err := c.conn.Write(response)
+	// If more results follow, set the SERVER_MORE_RESULTS_EXISTS flag in the last packet
+	if moreResults && lastPacketPos < len(respCopy) {
+		packet := respCopy[lastPacketPos:]
+		if len(packet) > 4 {
+			header := packet[4]
+			if header == OK_HEADER {
+				// OK packet: 00 <lenenc_rows> <lenenc_id> <status_flags(2)>
+				statusOffset := 5
+				_, _, n1 := ReadLengthEncodedInt(packet[statusOffset:])
+				statusOffset += n1
+				_, _, n2 := ReadLengthEncodedInt(packet[statusOffset:])
+				statusOffset += n2
+				if len(packet) >= statusOffset+2 {
+					status := binary.LittleEndian.Uint16(packet[statusOffset:])
+					status |= SERVER_MORE_RESULTS_EXISTS
+					binary.LittleEndian.PutUint16(packet[statusOffset:], status)
+				}
+			} else if header == EOF_HEADER {
+				// EOF packet: FE <warnings(2)> <status_flags(2)>
+				if len(packet) >= 9 {
+					status := binary.LittleEndian.Uint16(packet[7:9])
+					status |= SERVER_MORE_RESULTS_EXISTS
+					binary.LittleEndian.PutUint16(packet[7:9], status)
+				}
+			}
+		}
+	}
+
+	_, err := c.conn.Write(respCopy)
 	return err
 }
 
 func (c *clientConn) writeOK() error {
-	return c.writeOKWithInfo("")
+	return c.writeOKWithInfo("", false)
 }
 
-func (c *clientConn) writeOKWithInfo(info string) error {
+func (c *clientConn) writeOKWithInfo(info string, moreResults bool) error {
 	c.sequence++
-	packet := WriteOKPacket(0, 0, c.status, c.capability)
+	status := c.status
+	if moreResults {
+		status |= SERVER_MORE_RESULTS_EXISTS
+	}
+	packet := WriteOKPacket(0, 0, status, c.capability)
 	packet[3] = c.sequence
 	_, err := c.conn.Write(packet)
 	return err
@@ -1024,110 +1119,69 @@ func queryTypeLabel(t parser.QueryType) string {
 	}
 }
 
-func (c *clientConn) handleShowTQDBStatus() error {
-	// Build a simple result set following kingshard's approach
-	var result []byte
+func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
+	// Ensure we have a backend connection to execute the synthetic query
+	if err := c.ensureBackend(""); err != nil {
+		return err
+	}
 
-	// Prepare data
 	backend := c.lastQueryBackend
 	if backend == "" {
 		backend = "none"
 	}
-	cacheHit := "0"
-	if c.lastQueryCacheHit {
-		cacheHit = "1"
-	}
-
-	// Column count packet (2 columns)
-	c.sequence++
-	packet := make([]byte, 4)
-	packet = append(packet, PutLengthEncodedInt(2)...)
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
-	result = append(result, packet...)
-
-	// Column 1: Variable_name (use kingshard's Field.Dump() pattern)
-	c.sequence++
-	packet = make([]byte, 4)
-	packet = append(packet, PutLengthEncodedString([]byte("def"))...)           // catalog
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // schema
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // table
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // org_table
-	packet = append(packet, PutLengthEncodedString([]byte("Variable_name"))...) // name
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)              // org_name
-	packet = append(packet, 0x0c)                                               // filler
-	packet = append(packet, 0x21, 0x00)                                         // charset (utf8)
-	packet = append(packet, 0x00, 0x01, 0x00, 0x00)                             // column length (256)
-	packet = append(packet, 0xfd)                                               // type (VAR_STRING)
-	packet = append(packet, 0x00, 0x00)                                         // flags
-	packet = append(packet, 0x00)                                               // decimals
-	packet = append(packet, 0x00, 0x00)                                         // filler
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
-	result = append(result, packet...)
-
-	// Column 2: Value
-	c.sequence++
-	packet = make([]byte, 4)
-	packet = append(packet, PutLengthEncodedString([]byte("def"))...)   // catalog
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // schema
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // table
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // org_table
-	packet = append(packet, PutLengthEncodedString([]byte("Value"))...) // name
-	packet = append(packet, PutLengthEncodedString([]byte(""))...)      // org_name
-	packet = append(packet, 0x0c)                                       // filler
-	packet = append(packet, 0x21, 0x00)                                 // charset (utf8)
-	packet = append(packet, 0x00, 0x01, 0x00, 0x00)                     // column length (256)
-	packet = append(packet, 0xfd)                                       // type (VAR_STRING)
-	packet = append(packet, 0x00, 0x00)                                 // flags
-	packet = append(packet, 0x00)                                       // decimals
-	packet = append(packet, 0x00, 0x00)                                 // filler
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
-	result = append(result, packet...)
-
-	// EOF after columns
-	c.sequence++
-	eofPacket := WriteEOFPacket(c.status, c.capability)
-	eofPacket[3] = c.sequence
-	result = append(result, eofPacket...)
-
-	// Row 1: Shard
 	shard := c.lastQueryShard
 	if shard == "" {
 		shard = c.proxy.config.Default
 	}
-	c.sequence++
-	packet = make([]byte, 4)
-	packet = append(packet, PutLengthEncodedString([]byte("Shard"))...)
-	packet = append(packet, PutLengthEncodedString([]byte(shard))...)
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
-	result = append(result, packet...)
 
-	// Row 2: Backend
-	c.sequence++
-	packet = make([]byte, 4)
-	packet = append(packet, PutLengthEncodedString([]byte("Backend"))...)
-	packet = append(packet, PutLengthEncodedString([]byte(backend))...)
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
-	result = append(result, packet...)
+	// Build a synthetic query that returns the status as a result set
+	query := fmt.Sprintf("SELECT 'Shard' AS `Variable_name`, '%s' AS `Value` UNION ALL SELECT 'Backend', '%s'", shard, backend)
+	response, err := c.execBackendQuery(query)
+	if err != nil {
+		return err
+	}
 
-	// Row 2: Cache_hit
-	c.sequence++
-	packet = make([]byte, 4)
-	packet = append(packet, PutLengthEncodedString([]byte("Cache_hit"))...)
-	packet = append(packet, PutLengthEncodedString([]byte(cacheHit))...)
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	packet[3] = c.sequence
-	result = append(result, packet...)
+	return c.forwardBackendResponse(response, moreResults)
+}
+func splitQueries(query string) []string {
+	var queries []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+	escaped := false
 
-	// EOF after rows
-	c.sequence++
-	eofPacket = WriteEOFPacket(c.status, c.capability)
-	eofPacket[3] = c.sequence
-	result = append(result, eofPacket...)
-
-	return c.writeRaw(result)
+	for _, r := range query {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			current.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if (r == '\'' || r == '"' || r == '`') && !escaped {
+			if !inQuote {
+				inQuote = true
+				quoteChar = r
+			} else if r == quoteChar {
+				inQuote = false
+			}
+		}
+		if r == ';' && !inQuote {
+			q := strings.TrimSpace(current.String())
+			if q != "" {
+				queries = append(queries, q)
+			}
+			current.Reset()
+			continue
+		}
+		current.WriteRune(r)
+	}
+	q := strings.TrimSpace(current.String())
+	if q != "" {
+		queries = append(queries, q)
+	}
+	return queries
 }

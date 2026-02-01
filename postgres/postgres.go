@@ -382,7 +382,7 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 
 	// Check for TQDB status query (PostgreSQL style: pg_tqdb_status)
 	queryUpper := strings.ToUpper(strings.TrimSpace(query))
-	if queryUpper == "SELECT * FROM PG_TQDB_STATUS" {
+	if strings.Contains(queryUpper, "PG_TQDB_STATUS") {
 		p.handleShowTQDBStatus(client, state)
 		return
 	}
@@ -406,14 +406,18 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 			// Handle stale data with background refresh
 			if flags == cache.FlagRefresh {
 				// First stale access - trigger background refresh
-				go p.refreshQueryInBackground(parsed.Query, db)
+				go p.refreshQueryInBackground(parsed.Query, parsed.TTL, db)
 			}
 			// Serve from cache (fresh or stale)
 			metrics.CacheHits.WithLabelValues(file, line).Inc()
 			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
 			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
-			state.lastBackend = "cache"
+			backend := "cache"
+			if flags != cache.FlagFresh {
+				backend = "cache (stale)"
+			}
+			state.lastBackend = backend
 			state.lastCacheHit = true
 
 			if _, err := client.Write(cached); err != nil {
@@ -534,7 +538,7 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 
 // refreshQueryInBackground refreshes a stale cache entry.
 // Called when cache.FlagRefresh is returned (first stale access).
-func (p *Proxy) refreshQueryInBackground(query string, db *sql.DB) {
+func (p *Proxy) refreshQueryInBackground(query string, ttl int, db *sql.DB) {
 	parsed := parser.Parse(query)
 	rows, err := db.Query(parsed.Query)
 	if err != nil {
@@ -561,14 +565,15 @@ func (p *Proxy) refreshQueryInBackground(query string, db *sql.DB) {
 			response.Write(p.buildDataRow(values))
 			rowCount++
 		}
-
-		cmdPayload := append([]byte(fmt.Sprintf("SELECT %d", rowCount)), 0)
-		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+		response.Write(p.encodeMessage(msgCommandComplete, []byte(fmt.Sprintf("SELECT %d", rowCount))))
+	} else {
+		// No results
+		response.Write(p.encodeMessage(msgCommandComplete, []byte("SELECT 0")))
 	}
 	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
 
-	// Update cache with fresh data
-	p.cache.Set(parsed.Query, response.Bytes(), time.Duration(parsed.TTL)*time.Second)
+	// Final set in cache - use the passed TTL
+	p.cache.Set(parsed.Query, response.Bytes(), time.Duration(ttl)*time.Second)
 }
 
 func (p *Proxy) buildRowDescription(cols []string) []byte {
@@ -688,10 +693,6 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 	if backend == "" {
 		backend = "none"
 	}
-	cacheHit := "0"
-	if state.lastCacheHit {
-		cacheHit = "1"
-	}
 
 	// Build result set with columns: variable_name, value
 	cols := []string{"variable_name", "value"}
@@ -703,11 +704,8 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 	// Row 2: Backend
 	response.Write(p.buildDataRow([]interface{}{"Backend", backend}))
 
-	// Row 3: Cache_hit
-	response.Write(p.buildDataRow([]interface{}{"Cache_hit", cacheHit}))
-
 	// CommandComplete
-	cmdPayload := append([]byte("SELECT 3"), 0)
+	cmdPayload := append([]byte("SELECT 2"), 0)
 	response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
 
 	// ReadyForQuery

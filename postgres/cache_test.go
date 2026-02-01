@@ -48,9 +48,6 @@ func TestCacheHit(t *testing.T) {
 		if !strings.HasPrefix(status["Backend"], "replicas[") {
 			t.Errorf("Expected Backend to start with replicas[ after first query, got %s", status["Backend"])
 		}
-		if status["Cache_hit"] != "0" {
-			t.Errorf("Expected Cache_hit=0 after first query, got %s", status["Cache_hit"])
-		}
 
 		// Second query - cache hit (same query)
 		_, err = db.Exec(query)
@@ -75,9 +72,6 @@ func TestCacheHit(t *testing.T) {
 
 		if status2["Backend"] != "cache" {
 			t.Errorf("Expected Backend=cache after second query, got %s", status2["Backend"])
-		}
-		if status2["Cache_hit"] != "1" {
-			t.Errorf("Expected Cache_hit=1 after second query, got %s", status2["Cache_hit"])
 		}
 	})
 }

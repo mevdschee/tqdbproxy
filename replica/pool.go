@@ -102,9 +102,11 @@ func (p *Pool) MarkUnhealthy(addr string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if _, exists := p.healthy[addr]; exists {
+	if wasHealthy, exists := p.healthy[addr]; exists {
 		p.healthy[addr] = false
-		log.Printf("[Replica] Marked %s as unhealthy", addr)
+		if wasHealthy {
+			log.Printf("[Replica] Marked %s as unhealthy", addr)
+		}
 	}
 }
 
@@ -113,10 +115,9 @@ func (p *Pool) MarkHealthy(addr string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if _, exists := p.healthy[addr]; exists {
-		wasUnhealthy := !p.healthy[addr]
+	if wasUnhealthy, exists := p.healthy[addr]; exists {
 		p.healthy[addr] = true
-		if wasUnhealthy {
+		if !wasUnhealthy {
 			log.Printf("[Replica] Marked %s as healthy", addr)
 		}
 	}

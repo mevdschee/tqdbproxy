@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -214,5 +215,56 @@ func TestCache_StaleRefresh(t *testing.T) {
 	_, flags3, ok3 := c.Get(key)
 	if ok3 && flags3 != FlagStale {
 		t.Logf("Second stale access: flags=%d (expected FlagStale=1)", flags3)
+	}
+}
+
+// TestCache_StaleConcurrentSingleFlight tests that multiple concurrent requests
+// for a stale key result in exactly one FlagRefresh.
+func TestCache_StaleConcurrentSingleFlight(t *testing.T) {
+	cfg := CacheConfig{
+		MaxMemory:       64 * 1024 * 1024,
+		Workers:         4,
+		StaleMultiplier: 3.0,
+	}
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+	defer c.Close()
+
+	key := "stale-concurrent-test"
+	c.Set(key, []byte("val"), 100*time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+
+	// Wait for soft expiry
+	time.Sleep(150 * time.Millisecond)
+
+	numConcurrent := 100
+	var refreshCount int32
+	var staleCount int32
+	done := make(chan bool, numConcurrent)
+
+	for i := 0; i < numConcurrent; i++ {
+		go func() {
+			_, flags, ok := c.Get(key)
+			if ok {
+				if flags == FlagRefresh {
+					atomic.AddInt32(&refreshCount, 1)
+				} else if flags == FlagStale {
+					atomic.AddInt32(&staleCount, 1)
+				}
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < numConcurrent; i++ {
+		<-done
+	}
+
+	t.Logf("Concurrent stale results: FlagRefresh=%d, FlagStale=%d", refreshCount, staleCount)
+
+	if atomic.LoadInt32(&refreshCount) != 1 {
+		t.Errorf("Expected exactly 1 FlagRefresh, got %d", refreshCount)
 	}
 }

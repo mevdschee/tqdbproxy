@@ -120,7 +120,9 @@ func (c *Cache) CancelInflight(key string) {
 
 // Set stores a result with the specified TTL (for backward compatibility)
 func (c *Cache) Set(key string, value []byte, ttl time.Duration) {
-	c.store.Set(key, value, ttl)
+	if ttl > 0 {
+		c.store.Set(key, value, ttl)
+	}
 }
 
 // Delete removes an entry from the cache
