@@ -2,8 +2,10 @@ package mariadb
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -30,6 +32,8 @@ const (
 	comPing        = 0x0e
 	comStmtPrepare = 0x16
 	comStmtExecute = 0x17
+	comStmtClose   = 0x19
+	comStmtReset   = 0x1a
 )
 
 // Proxy implements a MariaDB server that forwards to backend
@@ -147,16 +151,17 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defer backend.Close()
 
 	conn := &clientConn{
-		conn:        client,
-		backend:     backend,
-		backendPool: defaultPool,
-		backendAddr: dialAddr,
-		backendName: "primary",
-		proxy:       p,
-		connID:      connID,
-		capability:  0,
-		status:      SERVER_STATUS_AUTOCOMMIT,
-		sequence:    0,
+		conn:               client,
+		backend:            backend,
+		backendPool:        defaultPool,
+		backendAddr:        dialAddr,
+		backendName:        "primary",
+		proxy:              p,
+		connID:             connID,
+		capability:         0,
+		status:             SERVER_STATUS_AUTOCOMMIT,
+		sequence:           0,
+		preparedStatements: make(map[uint32]string),
 	}
 
 	// Perform handshake with salt forwarding
@@ -194,6 +199,9 @@ type clientConn struct {
 	lastQueryBackend  string
 	lastQueryShard    string
 	lastQueryCacheHit bool
+
+	// Prepared statements
+	preparedStatements map[uint32]string
 }
 
 func (c *clientConn) handshake() error {
@@ -582,6 +590,14 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.handleExecute(data)
+	case comStmtClose:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.handleStmtClose(data)
+	case comStmtReset:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.handleStmtReset(data)
 	default:
 		return fmt.Errorf("command %d not supported", cmd)
 	}
@@ -766,8 +782,85 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 }
 
 func (c *clientConn) handlePrepare(query string) error {
-	// For now, just return an error - prepared statements need more work
-	return fmt.Errorf("prepared statements not yet supported in server mode")
+	// 1. Forward COM_STMT_PREPARE to backend
+	payload := make([]byte, 1+len(query))
+	payload[0] = comStmtPrepare
+	copy(payload[1:], query)
+
+	c.backendSeq = 255
+	if err := c.writeBackendPacket(payload); err != nil {
+		return err
+	}
+
+	// 2. Read STMT_PREPARE_OK response
+	response, err := c.readBackendPacket()
+	if err != nil {
+		return err
+	}
+
+	// Read and forward the full response chain
+	var fullResponse []byte
+	header := make([]byte, 4)
+	binary.LittleEndian.PutUint32(header[0:4], uint32(len(response)))
+	header[3] = c.backendSeq
+	fullResponse = append(fullResponse, header...)
+	fullResponse = append(fullResponse, response...)
+
+	if len(response) > 0 && response[0] == 0x00 { // OK
+		stmtID := binary.LittleEndian.Uint32(response[1:5])
+		numCols := binary.LittleEndian.Uint16(response[5:7])
+		numParams := binary.LittleEndian.Uint16(response[7:9])
+
+		c.preparedStatements[stmtID] = query
+
+		// Read parameters if any
+		if numParams > 0 {
+			for i := uint16(0); i < numParams; i++ {
+				p, err := c.readBackendPacket()
+				if err != nil {
+					return err
+				}
+				binary.LittleEndian.PutUint32(header[0:4], uint32(len(p)))
+				header[3] = c.backendSeq
+				fullResponse = append(fullResponse, header...)
+				fullResponse = append(fullResponse, p...)
+			}
+			// EOF after parameters
+			eof, err := c.readBackendPacket()
+			if err != nil {
+				return err
+			}
+			binary.LittleEndian.PutUint32(header[0:4], uint32(len(eof)))
+			header[3] = c.backendSeq
+			fullResponse = append(fullResponse, header...)
+			fullResponse = append(fullResponse, eof...)
+		}
+
+		// Read columns if any
+		if numCols > 0 {
+			for i := uint16(0); i < numCols; i++ {
+				p, err := c.readBackendPacket()
+				if err != nil {
+					return err
+				}
+				binary.LittleEndian.PutUint32(header[0:4], uint32(len(p)))
+				header[3] = c.backendSeq
+				fullResponse = append(fullResponse, header...)
+				fullResponse = append(fullResponse, p...)
+			}
+			// EOF after columns
+			eof, err := c.readBackendPacket()
+			if err != nil {
+				return err
+			}
+			binary.LittleEndian.PutUint32(header[0:4], uint32(len(eof)))
+			header[3] = c.backendSeq
+			fullResponse = append(fullResponse, header...)
+			fullResponse = append(fullResponse, eof...)
+		}
+	}
+
+	return c.forwardBackendResponse(fullResponse, false)
 }
 
 // refreshQueryInBackground refreshes a stale cache entry.
@@ -787,7 +880,149 @@ func (c *clientConn) refreshQueryInBackground(query string, ttl int) {
 }
 
 func (c *clientConn) handleExecute(data []byte) error {
-	return fmt.Errorf("prepared statements not yet supported in server mode")
+	if len(data) < 4 {
+		return fmt.Errorf("malformed COM_STMT_EXECUTE packet")
+	}
+	stmtID := binary.LittleEndian.Uint32(data[0:4])
+	query, ok := c.preparedStatements[stmtID]
+	if !ok {
+		return fmt.Errorf("unknown statement ID %d", stmtID)
+	}
+
+	parsed := parser.Parse(query)
+	var cacheKey string
+	if parsed.IsCacheable() {
+		// Form a cache key from query and parameters
+		h := sha1.New()
+		h.Write([]byte(query))
+		h.Write(data[4:]) // Parameters
+		cacheKey = "ps:" + hex.EncodeToString(h.Sum(nil))
+
+		// Check cache
+		cached, _, ok := c.proxy.cache.Get(cacheKey)
+		if ok {
+			c.lastQueryBackend = "cache"
+			c.lastQueryCacheHit = true
+			return c.forwardBackendResponse(cached, false)
+		}
+	}
+
+	// Forward COM_STMT_EXECUTE to backend
+	payload := make([]byte, 1+len(data))
+	payload[0] = comStmtExecute
+	copy(payload[1:], data)
+
+	c.backendSeq = 255
+	if err := c.writeBackendPacket(payload); err != nil {
+		return err
+	}
+
+	response, err := c.execBackendResponse()
+	if err != nil {
+		return err
+	}
+
+	if cacheKey != "" {
+		c.proxy.cache.Set(cacheKey, response, time.Duration(parsed.TTL)*time.Second)
+	}
+
+	c.lastQueryBackend = c.backendName
+	c.lastQueryCacheHit = false
+	return c.forwardBackendResponse(response, false)
+}
+
+func (c *clientConn) handleStmtClose(data []byte) error {
+	if len(data) >= 4 {
+		stmtID := binary.LittleEndian.Uint32(data[0:4])
+		delete(c.preparedStatements, stmtID)
+	}
+
+	payload := make([]byte, 1+len(data))
+	payload[0] = comStmtClose
+	copy(payload[1:], data)
+
+	c.backendSeq = 255
+	return c.writeBackendPacket(payload)
+}
+
+func (c *clientConn) handleStmtReset(data []byte) error {
+	payload := make([]byte, 1+len(data))
+	payload[0] = comStmtReset
+	copy(payload[1:], data)
+
+	c.backendSeq = 255
+	if err := c.writeBackendPacket(payload); err != nil {
+		return err
+	}
+
+	response, err := c.readBackendPacket()
+	if err != nil {
+		return err
+	}
+	return c.forwardBackendResponse(response, false)
+}
+
+func (c *clientConn) execBackendResponse() ([]byte, error) {
+	// This is similar to execBackendQuery but without sending the command
+	var response []byte
+	eofCount := 0
+	for {
+		packet, err := c.readBackendPacket()
+		if err != nil {
+			return nil, err
+		}
+
+		header := make([]byte, 4)
+		binary.LittleEndian.PutUint32(header[0:4], uint32(len(packet)))
+		header[3] = c.backendSeq
+		response = append(response, header...)
+		response = append(response, packet...)
+
+		if len(packet) > 0 {
+			headerByte := packet[0]
+			switch headerByte {
+			case 0x00: // OK or Binary Row
+				if eofCount == 1 {
+					// After first EOF, 0x00 is a Binary Data Row, not an OK packet.
+					// Keep reading until we see the final EOF/OK.
+					continue
+				}
+				// Otherwise, treat as OK packet
+				statusOffset := 1
+				_, _, n1 := ReadLengthEncodedInt(packet[statusOffset:])
+				statusOffset += n1
+				_, _, n2 := ReadLengthEncodedInt(packet[statusOffset:])
+				statusOffset += n2
+				if len(packet) >= statusOffset+2 {
+					status := binary.LittleEndian.Uint16(packet[statusOffset:])
+					if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+						return response, nil
+					}
+					eofCount = 0
+					continue
+				}
+				return response, nil
+			case 0xFF: // Error
+				return response, nil
+			case 0xFE: // EOF
+				if len(packet) < 9 {
+					eofCount++
+					if eofCount >= 2 {
+						// Checked for more results in EOF as well
+						if len(packet) >= 5 {
+							status := binary.LittleEndian.Uint16(packet[3:])
+							if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+								return response, nil
+							}
+							eofCount = 0
+							continue
+						}
+						return response, nil
+					}
+				}
+			}
+		}
+	}
 }
 
 func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
