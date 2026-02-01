@@ -170,6 +170,7 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 }
 
 type clientConn struct {
+	mu          sync.Mutex
 	conn        net.Conn
 	backend     net.Conn // Raw TCP connection to backend
 	backendPool *replica.Pool
@@ -475,7 +476,7 @@ func (c *clientConn) ensureBackend(db string) error {
 }
 
 func (c *clientConn) ensureBackendConn(addr string, name string, pool *replica.Pool) error {
-	if addr == c.backendAddr {
+	if addr == c.backendAddr && c.backend != nil {
 		return nil // Already on the right connection
 	}
 
@@ -551,13 +552,16 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	case comQuit:
 		return io.EOF
 	case comInitDB:
+		c.mu.Lock()
 		dbName := string(data)
 		if err := c.ensureBackend(dbName); err != nil {
+			c.mu.Unlock()
 			return err
 		}
 		c.db = dbName
 		// Execute USE database on backend
 		_, err := c.execBackendQuery(fmt.Sprintf("USE `%s`", dbName))
+		c.mu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -571,8 +575,12 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	case comQuery:
 		return c.handleQuery(string(data))
 	case comStmtPrepare:
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		return c.handlePrepare(string(data))
 	case comStmtExecute:
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		return c.handleExecute(data)
 	default:
 		return fmt.Errorf("command %d not supported", cmd)
@@ -628,6 +636,11 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 	if query != originalParsed.Query {
 		parsed = parser.Parse(query)
 	}
+
+	// Lock the session for the duration of a single statement processing
+	// This prevents background refreshes from interleaving with the main query stream
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	file := parsed.File
 	if file == "" {
@@ -760,6 +773,9 @@ func (c *clientConn) handlePrepare(query string) error {
 // refreshQueryInBackground refreshes a stale cache entry.
 // Called when cache.FlagRefresh is returned (first stale access).
 func (c *clientConn) refreshQueryInBackground(query string, ttl int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	parsed := parser.Parse(query)
 	response, err := c.execBackendQuery(parsed.Query)
 	if err != nil {
