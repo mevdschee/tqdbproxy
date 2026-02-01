@@ -10,38 +10,43 @@ Default path: `config.ini`
 [mariadb]
 listen = :3307
 socket = /var/run/tqdbproxy/mysql.sock
-primary = 127.0.0.1:3306
-replica1 = 127.0.0.2:3306
-replica2 = 127.0.0.3:3306
+default = main
 
-[postgres]
-listen = :5433
-socket = /var/run/tqdbproxy/.s.PGSQL.5433
-primary = 127.0.0.1:5432
-replica1 = 127.0.0.2:5432
+[mariadb.main]
+primary = 127.0.0.1:3306
+replicas = 127.0.0.2:3306, 127.0.0.3:3306
+
+[mariadb.shard1]
+primary = 10.0.0.1:3306
+databases = billing, reporting
 ```
 
 ### Options
 
-| Section   | Key       | Default         | Description                    |
-|-----------|-----------|-----------------|--------------------------------|
-| mariadb   | listen    | :3307           | TCP listen address             |
-| mariadb   | socket    |                 | Optional Unix socket path      |
-| mariadb   | primary   | 127.0.0.1:3306  | Primary database address       |
-| mariadb   | replica1-10 |               | Read replica addresses         |
-| postgres  | listen    | :5433           | TCP listen address             |
-| postgres  | socket    |                 | Optional Unix socket path      |
-| postgres  | primary   | 127.0.0.1:5432  | Primary database address       |
-| postgres  | replica1-10 |               | Read replica addresses         |
+| Section       | Key       | Default         | Description                                |
+|---------------|-----------|-----------------|--------------------------------------------|
+| [protocol]    | listen    | :3307 / :5433   | TCP listen address                         |
+| [protocol]    | socket    |                 | Optional Unix socket path                  |
+| [protocol]    | default   |                 | Name of the default (catch-all) backend   |
+| [protocol].id | primary   |                 | Primary database address for this shard    |
+| [protocol].id | replicas  |                 | Comma-separated list of read replicas     |
+| [protocol].id | databases |                 | Comma-separated list of databases for this shard |
+
+## Database Sharding
+
+TQDBProxy supports horizontal sharding. Queries are routed based on the database name:
+
+1. **PostgreSQL**: Routing is determined at connection time based on the database parameter in the startup message. Note that **schema sharding is not supported** (only database-level sharding).
+2. **MariaDB**: Supports transparent shifting mid-connection via `USE database` or `COM_INIT_DB` packets.
+
+This provides a unified sharding model across both protocols where a "Database" acts as the unit of distribution.
 
 ## Environment Variables
 
-Environment variables override config file values:
+The following environment variables are supported for overriding listen addresses:
 
-- `TQDBPROXY_MARIADB_LISTEN` - MariaDB listen address
-- `TQDBPROXY_MARIADB_PRIMARY` - MariaDB primary address
-- `TQDBPROXY_POSTGRES_LISTEN` - PostgreSQL listen address
-- `TQDBPROXY_POSTGRES_PRIMARY` - PostgreSQL primary address
+- `TQDBPROXY_MARIADB_LISTEN` - MariaDB TCP listen address
+- `TQDBPROXY_POSTGRES_LISTEN` - PostgreSQL TCP listen address
 
 ## Hot Config Reload
 

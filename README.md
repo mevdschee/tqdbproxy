@@ -10,6 +10,7 @@ Blog post: https://www.tqdev.com/2026-tqdbproxy-mariadb-postgresql-proxy/
 - **Caller Metadata**: Track queries by source file and line number
 - **Metrics**: Prometheus metrics for cache hits/misses, query latency, and more
 - **Read Replica Support**: Automatic routing of SELECT queries to replicas
+- **Database Sharding**: Automatic routing of queries to shards based on database name
 - **Transaction Support**: Full BEGIN/COMMIT/ROLLBACK support
 - **Interactive Mode**: Full interactive client support
 
@@ -99,12 +100,13 @@ primary = 127.0.0.1:3306
 replicas = 127.0.0.1:3307, 127.0.0.1:3308
 
 [mariadb.shard1]
-primary = 10.0.0.1:3306
-databases = users, profiles
+primary = 10.0.0.1:3309
+databases = logs
 ```
 
-### PostgreSQL Sharding Constraints
-PostgreSQL routing is strictly based on the **database name** provided during connection. **Schema sharding is not supported**; all schemas within a single database must reside on the same shard. This aligns 1:1 with the MariaDB implementation, where sharding is handled at the database level.
+### Sharding Constraints
+
+PostgreSQL routing is based on the **database name** provided during connection and (schema sharding is not supported) and this aligns 1:1 with the MariaDB implementation. Note that it is the responsibility of the user to keep the database usernames and passwords in sync across shards as the proxy forwards the credentials to the backend.
 
 ## Thundering Herd Protection
 
