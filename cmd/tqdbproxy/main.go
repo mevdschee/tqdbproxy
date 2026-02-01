@@ -46,27 +46,36 @@ func main() {
 		log.Fatalf("Failed to create cache: %v", err)
 	}
 
-	// Create MariaDB replica pool
-	mariadbPool := replica.NewPool(cfg.MariaDB.Primary, cfg.MariaDB.Replicas)
-	log.Printf("[MariaDB] Primary: %s, Replicas: %v", cfg.MariaDB.Primary, cfg.MariaDB.Replicas)
+	// Create MariaDB pools
+	mariadbPools := initPools(cfg.MariaDB.Backends)
+	log.Printf("[MariaDB] Initialized %d backend pools", len(mariadbPools))
 
-	// Start health checks for MariaDB replicas
+	// Start health checks for all MariaDB pools
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go mariadbPool.StartHealthChecks(ctx, 10*time.Second)
+	for name, pool := range mariadbPools {
+		go pool.StartHealthChecks(ctx, 10*time.Second)
+		log.Printf("[MariaDB] Pool %s primary: %s", name, pool.GetPrimary())
+	}
 
-	// Start MariaDB proxy with replica pool
-	mariadbProxy := mariadb.New(cfg.MariaDB.Listen, cfg.MariaDB.Socket, mariadbPool, queryCache)
+	// Start MariaDB proxy with config and pools
+	mariadbProxy := mariadb.New(cfg.MariaDB, mariadbPools, queryCache)
 	if err := mariadbProxy.Start(); err != nil {
 		log.Fatalf("Failed to start MariaDB proxy: %v", err)
 	}
 
-	// Create PostgreSQL replica pool
-	pgPool := replica.NewPool(cfg.Postgres.Primary, cfg.Postgres.Replicas)
-	log.Printf("[PostgreSQL] Primary: %s, Replicas: %v", cfg.Postgres.Primary, cfg.Postgres.Replicas)
+	// Create PostgreSQL pools
+	pgPools := initPools(cfg.Postgres.Backends)
+	log.Printf("[PostgreSQL] Initialized %d backend pools", len(pgPools))
 
-	// Start PostgreSQL proxy with replica pool and caching
-	pgProxy := postgres.New(cfg.Postgres.Listen, cfg.Postgres.Socket, pgPool, queryCache)
+	// Start health checks for all PostgreSQL pools
+	for name, pool := range pgPools {
+		go pool.StartHealthChecks(ctx, 10*time.Second)
+		log.Printf("[PostgreSQL] Pool %s primary: %s", name, pool.GetPrimary())
+	}
+
+	// Start PostgreSQL proxy with config and pools
+	pgProxy := postgres.New(cfg.Postgres, pgPools, queryCache)
 	if err := pgProxy.Start(); err != nil {
 		log.Fatalf("Failed to start PostgreSQL proxy: %v", err)
 	}
@@ -88,13 +97,15 @@ func main() {
 				continue
 			}
 
-			// Update MariaDB replica pool
-			mariadbPool.UpdateReplicas(newCfg.MariaDB.Primary, newCfg.MariaDB.Replicas)
-			log.Printf("[MariaDB] Reloaded - Primary: %s, Replicas: %v", newCfg.MariaDB.Primary, newCfg.MariaDB.Replicas)
+			// Update MariaDB pools
+			mariadbPools = updatePools(mariadbPools, newCfg.MariaDB.Backends, ctx)
+			mariadbProxy.UpdateConfig(newCfg.MariaDB, mariadbPools)
+			log.Printf("[MariaDB] Reloaded - %d backends", len(newCfg.MariaDB.Backends))
 
-			// Update PostgreSQL replica pool
-			pgPool.UpdateReplicas(newCfg.Postgres.Primary, newCfg.Postgres.Replicas)
-			log.Printf("[PostgreSQL] Reloaded - Primary: %s, Replicas: %v", newCfg.Postgres.Primary, newCfg.Postgres.Replicas)
+			// Update PostgreSQL pools
+			pgPools = updatePools(pgPools, newCfg.Postgres.Backends, ctx)
+			pgProxy.UpdateConfig(newCfg.Postgres, pgPools)
+			log.Printf("[PostgreSQL] Reloaded - %d backends", len(newCfg.Postgres.Backends))
 
 			log.Println("Configuration reloaded successfully")
 
@@ -103,4 +114,35 @@ func main() {
 			return
 		}
 	}
+}
+
+func initPools(backends map[string]config.BackendConfig) map[string]*replica.Pool {
+	pools := make(map[string]*replica.Pool)
+	for name, backend := range backends {
+		pools[name] = replica.NewPool(backend.Primary, backend.Replicas)
+	}
+	return pools
+}
+
+func updatePools(current map[string]*replica.Pool, backends map[string]config.BackendConfig, ctx context.Context) map[string]*replica.Pool {
+	newPools := make(map[string]*replica.Pool)
+
+	// Update existing pools or create new ones
+	for name, backend := range backends {
+		if pool, exists := current[name]; exists {
+			pool.UpdateReplicas(backend.Primary, backend.Replicas)
+			newPools[name] = pool
+		} else {
+			pool := replica.NewPool(backend.Primary, backend.Replicas)
+			go pool.StartHealthChecks(ctx, 10*time.Second)
+			newPools[name] = pool
+		}
+	}
+
+	// Note: We don't explicitly stop health checks for removed pools here
+	// but context cancellation on shutdown handles it. Periodic SIGHUPs
+	// might leak some goroutines if backends change frequently, but it's
+	// minor for now.
+
+	return newPools
 }

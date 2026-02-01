@@ -11,10 +11,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/mevdschee/tqdbproxy/cache"
+	"github.com/mevdschee/tqdbproxy/config"
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
 	"github.com/mevdschee/tqdbproxy/replica"
@@ -59,50 +61,63 @@ func queryTypeLabel(t parser.QueryType) string {
 
 // Proxy handles PostgreSQL protocol connections with caching
 type Proxy struct {
-	listen      string
-	socket      string // Optional Unix socket path
-	replicaPool *replica.Pool
-	cache       *cache.Cache
+	config config.ProxyConfig
+	pools  map[string]*replica.Pool
+	cache  *cache.Cache
+	mu     sync.RWMutex
 }
 
 // connState tracks per-connection state for TQDB status
 type connState struct {
 	lastBackend  string
 	lastCacheHit bool
+	pool         *replica.Pool
 }
 
 // New creates a new PostgreSQL proxy
-func New(listen, socket string, pool *replica.Pool, c *cache.Cache) *Proxy {
+func New(pcfg config.ProxyConfig, pools map[string]*replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
-		listen:      listen,
-		socket:      socket,
-		replicaPool: pool,
-		cache:       c,
+		config: pcfg,
+		pools:  pools,
+		cache:  c,
 	}
+}
+
+// UpdateConfig updates the proxy configuration and pools
+func (p *Proxy) UpdateConfig(pcfg config.ProxyConfig, pools map[string]*replica.Pool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.config = pcfg
+	p.pools = pools
 }
 
 // Start begins accepting PostgreSQL connections
 func (p *Proxy) Start() error {
+	p.mu.RLock()
+	listen := p.config.Listen
+	socket := p.config.Socket
+	p.mu.RUnlock()
+
 	// Start TCP listener
-	tcpListener, err := net.Listen("tcp", p.listen)
+	tcpListener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
 	}
-	log.Printf("[PostgreSQL] Listening on %s (tcp), forwarding to %s", p.listen, p.replicaPool.GetPrimary())
+	log.Printf("[PostgreSQL] Listening on %s (tcp), forwarding to %v backends", listen, len(p.pools))
 
 	go p.acceptLoop(tcpListener)
 
 	// Start Unix socket listener if configured
-	if p.socket != "" {
+	if socket != "" {
 		// Remove existing socket file if present
-		if err := os.Remove(p.socket); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
 			log.Printf("[PostgreSQL] Warning: could not remove existing socket: %v", err)
 		}
-		unixListener, err := net.Listen("unix", p.socket)
+		unixListener, err := net.Listen("unix", socket)
 		if err != nil {
 			return fmt.Errorf("failed to listen on unix socket: %v", err)
 		}
-		log.Printf("[PostgreSQL] Listening on %s (unix)", p.socket)
+		log.Printf("[PostgreSQL] Listening on %s (unix)", socket)
 		go p.acceptLoop(unixListener)
 	}
 
@@ -176,9 +191,33 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 		password = password[:len(password)-1]
 	}
 
+	// Determine backend pool based on database
+	p.mu.RLock()
+	backendName := p.config.DBMap[database]
+	if backendName == "" {
+		backendName = p.config.Default
+	}
+	pool := p.pools[backendName]
+	p.mu.RUnlock()
+
+	if pool == nil {
+		log.Printf("[PostgreSQL] No pool found for database %s (backend %s)", database, backendName)
+		p.sendFatalError(client, "08006", "no backend pool configured")
+		return
+	}
+
 	// Connect to backend using the client's credentials
+	addr := pool.GetPrimary()
 	dsn := fmt.Sprintf("host=%s port=5432 user=%s password=%s dbname=%s sslmode=disable",
 		"127.0.0.1", user, password, database)
+
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable",
+			addr[5:], user, password, database)
+	} else if h, p, err := net.SplitHostPort(addr); err == nil {
+		dsn = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			h, p, user, password, database)
+	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

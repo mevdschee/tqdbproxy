@@ -85,19 +85,26 @@ Values: `Backend` = `primary`, `replicaN`, `cache`, or `none` (no query yet); `C
 
 This is useful for debugging cache behavior during development.
 
-## Read Replicas
+## Sharding & Replicas
 
-Configure replicas in `config.ini`:
+Configure backends and database mappings in `config.ini`:
 
 ```ini
 [mariadb]
 listen = :3307
+default = main
+
+[mariadb.main]
 primary = 127.0.0.1:3306
-replica1 = 127.0.0.2:3306
-replica2 = 127.0.0.3:3306
+replicas = 127.0.0.1:3307, 127.0.0.1:3308
+
+[mariadb.shard1]
+primary = 10.0.0.1:3306
+databases = users, profiles
 ```
 
-Select queries with a TTL hint are round-robin distributed across replicas.
+### PostgreSQL Sharding Constraints
+PostgreSQL routing is strictly based on the **database name** provided during connection. **Schema sharding is not supported**; all schemas within a single database must reside on the same shard. This aligns 1:1 with the MariaDB implementation, where sharding is handled at the database level.
 
 ## Thundering Herd Protection
 

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/ini.v1"
 )
@@ -13,10 +15,17 @@ type Config struct {
 	Postgres ProxyConfig
 }
 
-// ProxyConfig holds configuration for a single protocol proxy
+// ProxyConfig holds configuration for a protocol proxy with multiple backends
 type ProxyConfig struct {
-	Listen   string   // TCP listen address (e.g., ":3307")
-	Socket   string   // Optional Unix socket path
+	Listen   string                   // TCP listen address (e.g., ":3307")
+	Socket   string                   // Optional Unix socket path
+	Default  string                   // Name of the default backend
+	Backends map[string]BackendConfig // Backend pool configurations
+	DBMap    map[string]string        // Mapping of database names to backend names
+}
+
+// BackendConfig holds configuration for a single backend pool (primary + replicas)
+type BackendConfig struct {
 	Primary  string   // Primary database address
 	Replicas []string // Read replica addresses
 }
@@ -29,50 +38,94 @@ func Load(path string) (*Config, error) {
 	}
 
 	config := &Config{
-		MariaDB:  loadProxyConfig(cfg, "mariadb", ":3307", "127.0.0.1:3306"),
-		Postgres: loadProxyConfig(cfg, "postgres", ":5433", "127.0.0.1:5432"),
+		MariaDB:  loadProxyConfig(cfg, "mariadb", ":3307"),
+		Postgres: loadProxyConfig(cfg, "postgres", ":5433"),
 	}
 
 	// Environment variable overrides for MariaDB
 	if v := os.Getenv("TQDBPROXY_MARIADB_LISTEN"); v != "" {
 		config.MariaDB.Listen = v
 	}
-	if v := os.Getenv("TQDBPROXY_MARIADB_PRIMARY"); v != "" {
-		config.MariaDB.Primary = v
-	}
-
 	// Environment variable overrides for Postgres
 	if v := os.Getenv("TQDBPROXY_POSTGRES_LISTEN"); v != "" {
 		config.Postgres.Listen = v
-	}
-	if v := os.Getenv("TQDBPROXY_POSTGRES_PRIMARY"); v != "" {
-		config.Postgres.Primary = v
 	}
 
 	return config, nil
 }
 
-func loadProxyConfig(cfg *ini.File, section, defaultListen, defaultPrimary string) ProxyConfig {
-	sec := cfg.Section(section)
+func loadProxyConfig(cfg *ini.File, protocol, defaultListen string) ProxyConfig {
+	sec := cfg.Section(protocol)
 
-	listen := sec.Key("listen").MustString(defaultListen)
-	socket := sec.Key("socket").String() // Optional Unix socket path
-	primary := sec.Key("primary").MustString(defaultPrimary)
+	pcfg := ProxyConfig{
+		Listen:   sec.Key("listen").MustString(defaultListen),
+		Socket:   sec.Key("socket").String(),
+		Default:  sec.Key("default").MustString("main"),
+		Backends: make(map[string]BackendConfig),
+		DBMap:    make(map[string]string),
+	}
 
-	// Parse replicas (replica1, replica2, etc.)
-	var replicas []string
-	for i := 1; i <= 10; i++ { // Support up to 10 replicas
-		keyName := "replica" + strconv.Itoa(i)
-		replica := sec.Key(keyName).String()
-		if replica != "" {
-			replicas = append(replicas, replica)
+	// Find all backends for this protocol [protocol.name]
+	sections := cfg.Sections()
+	prefix := protocol + "."
+	for _, s := range sections {
+		name := s.Name()
+		if len(name) > len(prefix) && name[:len(prefix)] == prefix {
+			backendName := name[len(prefix):]
+
+			// Load primary and replicas
+			primary := s.Key("primary").String()
+
+			// Support both modern comma-separated replicas and legacy replica1, replica2...
+			var replicas []string
+			if s.HasKey("replicas") {
+				raw := s.Key("replicas").String()
+				if raw != "" {
+					parts := strings.Split(raw, ",")
+					for _, p := range parts {
+						replicas = append(replicas, strings.TrimSpace(p))
+					}
+				}
+			} else {
+				// Legacy support for replicaN
+				for i := 1; i <= 10; i++ {
+					keyName := "replica" + strconv.Itoa(i)
+					replica := s.Key(keyName).String()
+					if replica != "" {
+						replicas = append(replicas, replica)
+					}
+				}
+			}
+
+			// If no primary is set, check if this is the legacy format [mariadb] section
+			// though we prefer the new [mariadb.main] format.
+			if primary == "" && protocol == name {
+				// This shouldn't happen with the prefix check but just in case
+				continue
+			}
+
+			if primary != "" {
+				pcfg.Backends[backendName] = BackendConfig{
+					Primary:  primary,
+					Replicas: replicas,
+				}
+
+				// Map databases to this backend
+				if s.HasKey("databases") {
+					dbs := s.Key("databases").String()
+					parts := strings.Split(dbs, ",")
+					for _, db := range parts {
+						pcfg.DBMap[strings.TrimSpace(db)] = backendName
+					}
+				}
+			}
 		}
 	}
 
-	return ProxyConfig{
-		Listen:   listen,
-		Socket:   socket,
-		Primary:  primary,
-		Replicas: replicas,
+	// Check if at least one backend is defined
+	if len(pcfg.Backends) == 0 {
+		log.Printf("Warning: no backends defined for %s, proxy will have no shards", protocol)
 	}
+
+	return pcfg
 }

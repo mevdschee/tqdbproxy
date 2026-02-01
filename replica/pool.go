@@ -166,8 +166,15 @@ func (p *Pool) checkAllReplicas() {
 }
 
 func (p *Pool) checkReplica(addr string) {
-	// Simple TCP connection check
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	network := "tcp"
+	dialAddr := addr
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		network = "unix"
+		dialAddr = addr[5:]
+	}
+
+	// Simple connection check
+	conn, err := net.DialTimeout(network, dialAddr, 2*time.Second)
 	if err != nil {
 		p.MarkUnhealthy(addr)
 		return

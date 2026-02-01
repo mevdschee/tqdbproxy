@@ -11,10 +11,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/mevdschee/tqdbproxy/cache"
+	"github.com/mevdschee/tqdbproxy/config"
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
 	"github.com/mevdschee/tqdbproxy/replica"
@@ -32,29 +34,51 @@ const (
 
 // Proxy implements a MariaDB server that forwards to backend
 type Proxy struct {
-	listen      string
-	socket      string // Optional Unix socket path
-	replicaPool *replica.Pool
-	cache       *cache.Cache
-	db          *sql.DB
-	connID      uint32
+	config config.ProxyConfig
+	pools  map[string]*replica.Pool
+	cache  *cache.Cache
+	db     *sql.DB
+	connID uint32
+	mu     sync.RWMutex
 }
 
 // New creates a new MariaDB proxy
-func New(listen, socket string, pool *replica.Pool, c *cache.Cache) *Proxy {
+func New(pcfg config.ProxyConfig, pools map[string]*replica.Pool, c *cache.Cache) *Proxy {
 	return &Proxy{
-		listen:      listen,
-		socket:      socket,
-		replicaPool: pool,
-		cache:       c,
-		connID:      1000,
+		config: pcfg,
+		pools:  pools,
+		cache:  c,
+		connID: 1000,
 	}
+}
+
+// UpdateConfig updates the proxy configuration and pools
+func (p *Proxy) UpdateConfig(pcfg config.ProxyConfig, pools map[string]*replica.Pool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.config = pcfg
+	p.pools = pools
 }
 
 // Start begins accepting MariaDB connections
 func (p *Proxy) Start() error {
+	p.mu.RLock()
+	listen := p.config.Listen
+	socket := p.config.Socket
+	defaultBackend := p.config.Default
+	defaultPool := p.pools[defaultBackend]
+	p.mu.RUnlock()
+
+	if defaultPool == nil {
+		return fmt.Errorf("default backend pool %q not found", defaultBackend)
+	}
+
 	// Connect to backend MariaDB (using tqdbproxy credentials for testing)
-	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", p.replicaPool.GetPrimary())
+	addr := defaultPool.GetPrimary()
+	dsn := fmt.Sprintf("tqdbproxy:tqdbproxy@tcp(%s)/", addr)
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		dsn = fmt.Sprintf("tqdbproxy:tqdbproxy@unix(%s)/", addr[5:])
+	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to connect to backend: %v", err)
@@ -62,25 +86,25 @@ func (p *Proxy) Start() error {
 	p.db = db
 
 	// Start TCP listener
-	tcpListener, err := net.Listen("tcp", p.listen)
+	tcpListener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
 	}
-	log.Printf("[MariaDB] Listening on %s (tcp), forwarding to %s", p.listen, p.replicaPool.GetPrimary())
+	log.Printf("[MariaDB] Listening on %s (tcp), forwarding to %v backends", listen, len(p.pools))
 
 	go p.acceptLoop(tcpListener)
 
 	// Start Unix socket listener if configured
-	if p.socket != "" {
+	if socket != "" {
 		// Remove existing socket file if present
-		if err := os.Remove(p.socket); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
 			log.Printf("[MariaDB] Warning: could not remove existing socket: %v", err)
 		}
-		unixListener, err := net.Listen("unix", p.socket)
+		unixListener, err := net.Listen("unix", socket)
 		if err != nil {
 			return fmt.Errorf("failed to listen on unix socket: %v", err)
 		}
-		log.Printf("[MariaDB] Listening on %s (unix)", p.socket)
+		log.Printf("[MariaDB] Listening on %s (unix)", socket)
 		go p.acceptLoop(unixListener)
 	}
 
@@ -102,8 +126,20 @@ func (p *Proxy) acceptLoop(listener net.Listener) {
 func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defer client.Close()
 
-	// Connect to backend FIRST to get its salt
-	backend, err := net.Dial("tcp", p.replicaPool.GetPrimary())
+	p.mu.RLock()
+	defaultPool := p.pools[p.config.Default]
+	p.mu.RUnlock()
+
+	// Connect to default backend FIRST to get its salt
+	addr := defaultPool.GetPrimary()
+	network := "tcp"
+	dialAddr := addr
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		network = "unix"
+		dialAddr = addr[5:]
+	}
+
+	backend, err := net.Dial(network, dialAddr)
 	if err != nil {
 		log.Printf("[MariaDB] Failed to connect to backend for conn %d: %v", connID, err)
 		return
@@ -111,13 +147,14 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defer backend.Close()
 
 	conn := &clientConn{
-		conn:       client,
-		backend:    backend,
-		proxy:      p,
-		connID:     connID,
-		capability: 0,
-		status:     SERVER_STATUS_AUTOCOMMIT,
-		sequence:   0,
+		conn:        client,
+		backend:     backend,
+		backendPool: defaultPool,
+		proxy:       p,
+		connID:      connID,
+		capability:  0,
+		status:      SERVER_STATUS_AUTOCOMMIT,
+		sequence:    0,
 	}
 
 	// Perform handshake with salt forwarding
@@ -131,19 +168,20 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 }
 
 type clientConn struct {
-	conn       net.Conn
-	backend    net.Conn // Raw TCP connection to backend
-	proxy      *Proxy
-	connID     uint32
-	capability uint32
-	status     uint16
-	sequence   byte
-	backendSeq byte // Sequence number for backend
-	salt       []byte
-	db         string
-	user       string // Client username
-	auth       []byte // Client auth response
-	rawAuthPkt []byte // Original client auth packet to forward
+	conn        net.Conn
+	backend     net.Conn // Raw TCP connection to backend
+	backendPool *replica.Pool
+	proxy       *Proxy
+	connID      uint32
+	capability  uint32
+	status      uint16
+	sequence    byte
+	backendSeq  byte // Sequence number for backend
+	salt        []byte
+	db          string
+	user        string // Client username
+	auth        []byte // Client auth response
+	rawAuthPkt  []byte // Original client auth packet to forward
 
 	// Last query metadata for SHOW TQDB STATUS
 	lastQueryBackend  string
@@ -390,12 +428,103 @@ func (c *clientConn) run() {
 	}
 }
 
+func (c *clientConn) ensureBackend(db string) error {
+	c.proxy.mu.RLock()
+	backendName := c.proxy.config.DBMap[db]
+	if backendName == "" {
+		backendName = c.proxy.config.Default
+	}
+	targetPool := c.proxy.pools[backendName]
+	c.proxy.mu.RUnlock()
+
+	if targetPool == nil {
+		return fmt.Errorf("no backend pool found for database %q", db)
+	}
+
+	if targetPool == c.backendPool {
+		return nil // Already on the right shard
+	}
+
+	log.Printf("[MariaDB] Switching backend for conn %d: %s -> %s (db: %s)", c.connID, c.backendPool.GetPrimary(), targetPool.GetPrimary(), db)
+
+	// Reconnect and re-authenticate
+	addr := targetPool.GetPrimary()
+	network := "tcp"
+	dialAddr := addr
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		network = "unix"
+		dialAddr = addr[5:]
+	}
+
+	newBackend, err := net.Dial(network, dialAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to new backend: %v", err)
+	}
+
+	// We need to perform the handshake with the new backend.
+	// NOTE: This usually fails with salt-forwarding because the new backend
+	// will have a different salt than what the client used.
+	// However, we attempt it by re-forwarding the original auth packet.
+
+	// Read greeting from new backend
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(newBackend, header); err != nil {
+		newBackend.Close()
+		return fmt.Errorf("failed to read from new backend: %v", err)
+	}
+	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(newBackend, payload); err != nil {
+		newBackend.Close()
+		return err
+	}
+
+	// Forward original auth to new backend
+	c.backendSeq = header[3] + 1
+	packet := make([]byte, 4+len(c.rawAuthPkt))
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(c.rawAuthPkt)))
+	packet[3] = c.backendSeq
+	copy(packet[4:], c.rawAuthPkt)
+	if _, err := newBackend.Write(packet); err != nil {
+		newBackend.Close()
+		return err
+	}
+
+	// Read auth response
+	if _, err := io.ReadFull(newBackend, header); err != nil {
+		newBackend.Close()
+		return err
+	}
+	length = int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+	payload = make([]byte, length)
+	if _, err := io.ReadFull(newBackend, payload); err != nil {
+		newBackend.Close()
+		return err
+	}
+
+	if len(payload) > 0 && payload[0] == 0xFF {
+		newBackend.Close()
+		return fmt.Errorf("backend switch auth failed (likely salt mismatch)")
+	}
+
+	// Switch successful
+	c.backend.Close()
+	c.backend = newBackend
+	c.backendPool = targetPool
+	c.backendSeq = header[3]
+
+	return nil
+}
+
 func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	switch cmd {
 	case comQuit:
 		return io.EOF
 	case comInitDB:
 		dbName := string(data)
+		if err := c.ensureBackend(dbName); err != nil {
+			return err
+		}
 		c.db = dbName
 		// Execute USE database on backend
 		_, err := c.execBackendQuery(fmt.Sprintf("USE `%s`", dbName))
@@ -410,7 +539,20 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	case comPing:
 		return c.writeOK()
 	case comQuery:
-		return c.handleQuery(string(data))
+		query := string(data)
+		// Check for USE statement
+		queryUpper := strings.ToUpper(strings.TrimSpace(query))
+		if strings.HasPrefix(queryUpper, "USE ") {
+			parts := strings.Fields(query)
+			if len(parts) >= 2 {
+				dbName := strings.Trim(parts[1], "`;")
+				if err := c.ensureBackend(dbName); err != nil {
+					return err
+				}
+				c.db = dbName
+			}
+		}
+		return c.handleQuery(query)
 	case comStmtPrepare:
 		return c.handlePrepare(string(data))
 	case comStmtExecute:
