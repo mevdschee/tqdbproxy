@@ -88,7 +88,7 @@ func (p *Pool) GetReplica() (string, string) {
 		attempts++
 
 		if p.healthy[replica] {
-			return replica, fmt.Sprintf("replica%d", idx+1)
+			return replica, fmt.Sprintf("replicas[%d]", idx)
 		}
 	}
 

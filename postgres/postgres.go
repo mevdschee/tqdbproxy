@@ -248,6 +248,9 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	binary.BigEndian.PutUint32(keyData[4:8], 12345)
 	p.writeMessage(client, msgBackendKeyData, keyData)
 
+	// Send ReadyForQuery
+	p.writeMessage(client, msgReadyForQuery, []byte{'I'})
+
 	// Handle messages
 	state := &connState{
 		shard:      backendName,

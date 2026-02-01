@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -44,8 +45,8 @@ func TestCacheHit(t *testing.T) {
 			status[varName] = value
 		}
 
-		if status["Backend"] != "primary" {
-			t.Errorf("Expected Backend=primary after first query, got %s", status["Backend"])
+		if !strings.HasPrefix(status["Backend"], "replicas[") {
+			t.Errorf("Expected Backend to start with replicas[ after first query, got %s", status["Backend"])
 		}
 		if status["Cache_hit"] != "0" {
 			t.Errorf("Expected Cache_hit=0 after first query, got %s", status["Cache_hit"])

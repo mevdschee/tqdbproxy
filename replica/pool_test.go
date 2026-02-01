@@ -66,8 +66,8 @@ func TestGetReplicaWithUnhealthy(t *testing.T) {
 		if replica == replicas[0] {
 			t.Errorf("Got unhealthy replica: %s", replica)
 		}
-		if name != "replica2" {
-			t.Errorf("Expected replica2, got %s", name)
+		if name != "replicas[1]" {
+			t.Errorf("Expected replicas[1], got %s", name)
 		}
 	}
 }
