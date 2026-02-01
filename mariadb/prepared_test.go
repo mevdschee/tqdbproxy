@@ -40,16 +40,23 @@ func TestPreparedStatements_Caching(t *testing.T) {
 	}
 	defer db.Close()
 
+	// Try using a single statement object to force reuse of stmt ID
+	stmt, err := db.Prepare("/* ttl:10 */ SELECT ?")
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	defer stmt.Close()
+
 	// 1. First execution (miss)
 	var val1 int
-	err = db.QueryRow("/* ttl:10 */ SELECT ?", 42).Scan(&val1)
+	err = stmt.QueryRow(42).Scan(&val1)
 	if err != nil {
 		t.Fatalf("First execute failed: %v", err)
 	}
 
 	// 2. Second execution (should be cache hit)
 	var val2 int
-	err = db.QueryRow("/* ttl:10 */ SELECT ?", 42).Scan(&val2)
+	err = stmt.QueryRow(42).Scan(&val2)
 	if err != nil {
 		t.Fatalf("Second execute failed: %v", err)
 	}
@@ -58,31 +65,38 @@ func TestPreparedStatements_Caching(t *testing.T) {
 		t.Errorf("Expected 42, got %d and %d", val1, val2)
 	}
 
-	// Double check cache hit by looking at TQDB STATUS
-	var varName, value string
-	err = db.QueryRow("SHOW TQDB STATUS").Scan(&varName, &value)
-	if err != nil {
-		t.Fatalf("SHOW TQDB STATUS failed: %v", err)
+	// Verify hit
+	if !isCacheHit(t, db) {
+		t.Errorf("Expected cache hit for same parameter")
 	}
-	// We check for "Backend" row. Value should be "cache"
-	// Wait, we need to iterate rows to find "Backend"
+
+	// 3. Third execution with different param (should be cache miss)
+	var val3 int
+	err = stmt.QueryRow(43).Scan(&val3)
+	if err != nil {
+		t.Fatalf("Third execute failed: %v", err)
+	}
+	if isCacheHit(t, db) {
+		t.Errorf("Expected cache miss for different parameter (43)")
+	}
+}
+
+func isCacheHit(t *testing.T, db *sql.DB) bool {
 	rows, err := db.Query("SHOW TQDB STATUS")
 	if err != nil {
 		t.Fatalf("SHOW TQDB STATUS query failed: %v", err)
 	}
 	defer rows.Close()
-	foundCache := false
 	for rows.Next() {
+		var varName, value string
 		if err := rows.Scan(&varName, &value); err != nil {
 			t.Fatal(err)
 		}
 		if varName == "Backend" && value == "cache" {
-			foundCache = true
+			return true
 		}
 	}
-	if !foundCache {
-		t.Errorf("Expected cache hit for prepared statement, but Backend was not 'cache'")
-	}
+	return false
 }
 
 func TestPreparedStatements_ResetClose(t *testing.T) {
@@ -124,4 +138,85 @@ func TestPreparedStatements_ResetClose(t *testing.T) {
 	}
 
 	// After close, trying to use it should fail (driver level check mostly, but proxy should have cleaned up too)
+}
+func TestPreparedStatements_CrossSession(t *testing.T) {
+	// 1. Session A: Executes and caches
+	db1, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
+	if err != nil {
+		t.Fatalf("Failed to connect to proxy: %v", err)
+	}
+	defer db1.Close()
+
+	var val1 int
+	err = db1.QueryRow("/* ttl:10 */ SELECT 1212").Scan(&val1)
+	if err != nil {
+		t.Fatalf("Session A execute failed: %v", err)
+	}
+
+	// 2. Session B: Should hit cache even with different connection/session
+	db2, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
+	if err != nil {
+		t.Fatalf("Failed to connect to second session: %v", err)
+	}
+	defer db2.Close()
+
+	var val2 int
+	err = db2.QueryRow("/* ttl:10 */ SELECT 1212").Scan(&val2)
+	if err != nil {
+		t.Fatalf("Session B execute failed: %v", err)
+	}
+
+	if !isCacheHit(t, db2) {
+		t.Errorf("Expected cross-session cache hit")
+	}
+}
+func TestPreparedStatements_MultipleIDs(t *testing.T) {
+	db, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
+	if err != nil {
+		t.Fatalf("Failed to connect to proxy: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Prepare multiple different statements
+	stmt1, err := db.Prepare("SELECT 101")
+	if err != nil {
+		t.Fatalf("Prepare 1 failed: %v", err)
+	}
+	defer stmt1.Close()
+
+	stmt2, err := db.Prepare("SELECT 202")
+	if err != nil {
+		t.Fatalf("Prepare 2 failed: %v", err)
+	}
+	defer stmt2.Close()
+
+	stmt3, err := db.Prepare("SELECT ? + 303")
+	if err != nil {
+		t.Fatalf("Prepare 3 failed: %v", err)
+	}
+	defer stmt3.Close()
+
+	// 2. Execute them in interleaved fashion to test ID routing
+	var v1, v2, v3 int
+
+	if err := stmt3.QueryRow(100).Scan(&v3); err != nil {
+		t.Fatalf("Execute 3 failed: %v", err)
+	}
+	if v3 != 403 {
+		t.Errorf("Expected 403, got %d", v3)
+	}
+
+	if err := stmt1.QueryRow().Scan(&v1); err != nil {
+		t.Fatalf("Execute 1 failed: %v", err)
+	}
+	if v1 != 101 {
+		t.Errorf("Expected 101, got %d", v1)
+	}
+
+	if err := stmt2.QueryRow().Scan(&v2); err != nil {
+		t.Fatalf("Execute 2 failed: %v", err)
+	}
+	if v2 != 202 {
+		t.Errorf("Expected 202, got %d", v2)
+	}
 }

@@ -892,10 +892,14 @@ func (c *clientConn) handleExecute(data []byte) error {
 	parsed := parser.Parse(query)
 	var cacheKey string
 	if parsed.IsCacheable() {
-		// Form a cache key from query and parameters
+		// Form a cache key from query, parameters and current database
+		// We use the stripped query to be consistent with COM_QUERY caching.
+		// We hash the parameters and flags (data[4:]) but NOT the stmtID (data[0:4])
+		// to ensure that cached results can be shared across different sessions.
 		h := sha1.New()
-		h.Write([]byte(query))
-		h.Write(data[4:]) // Parameters
+		h.Write([]byte(c.db))
+		h.Write([]byte(parsed.Query))
+		h.Write(data[4:])
 		cacheKey = "ps:" + hex.EncodeToString(h.Sum(nil))
 
 		// Check cache
