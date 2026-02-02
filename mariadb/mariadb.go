@@ -403,7 +403,6 @@ func (c *clientConn) readClientAuth() error {
 
 	// Capability flags
 	c.capability = binary.LittleEndian.Uint32(packet[pos : pos+4])
-	log.Printf("[MariaDB] Client %d capabilities: 0x%08x", c.connID, c.capability)
 	pos += 4
 
 	// Max packet size
@@ -448,7 +447,6 @@ func (c *clientConn) readClientAuth() error {
 		idx := bytes.IndexByte(packet[pos:], 0)
 		if idx != -1 {
 			c.db = string(packet[pos : pos+idx])
-			log.Printf("[MariaDB] Client %d selecting DB: %q", c.connID, c.db)
 		}
 	}
 
