@@ -108,36 +108,9 @@ Labels are enriched with the `file` and `line` metadata hints.
 
 ---
 
-## Quick Start
+## Configuration
 
-```bash
-# 1. Start the proxy
-./tqdbproxy
-
-# 2. Connect via MariaDB
-mariadb -h 127.0.0.1 -P 3307 -u user -p --comments
-
-# 3. Connect via PostgreSQL
-psql -h 127.0.0.1 -p 5433 -U user -d database
-```
-
----
-
-## Demo
-
-```bash
-mysql -u tqdbproxy tqdbproxy -ptqdbproxy -P 3307 --comments
-```
-
-```sql
-/* ttl:2 */ select sleep(1); show tqdb status;
-```
-
----
-
-## Sharding & Replicas
-
-Configure backends and database mappings in `config.ini`:
+Replication & Sharding
 
 ```ini
 [mariadb]
@@ -151,6 +124,18 @@ replicas = 127.0.0.1:3307, 127.0.0.1:3308
 [mariadb.shard1]
 primary = 10.0.0.1:3309
 databases = logs
+```
+
+---
+
+## Demo
+
+```bash
+mysql -u tqdbproxy tqdbproxy -ptqdbproxy -P 3307 --comments
+```
+
+```sql
+/* ttl:2 */ select sleep(1); show tqdb status;
 ```
 
 ---
@@ -174,6 +159,27 @@ databases = logs
 
 ---
 
-**TQDBProxy** — Sharding, Caching, Reliability
+## Summary
 
-[https://github.com/mevdschee/tqdbproxy](https://github.com/mevdschee/tqdbproxy)
+- Databases are fast, **NVMe drives** have ridiculous performance
+- Trade durability for performance first, if possible (**periodic fsync**)
+- 1M QPS is quite easy: (smart) **caches** + (read) **replicas** + (database) **shards**
+
+---
+
+## Disclaimer
+
+- Built in a few weeks (**AI assisted**)
+- Work in progress (**optimizing further**)
+- No production use (**yet**)
+- No warranties (**use at your own risk**)
+
+---
+
+## Questions?
+
+Repository:
+[github.com/mevdschee/tqdbproxy](https://github.com/mevdschee/tqdbproxy)
+
+Blog post:
+[tqdev.com/2026-tqdbproxy-mariadb-postgresql-proxy](https://tqdev.com/2026-tqdbproxy-mariadb-postgresql-proxy)
