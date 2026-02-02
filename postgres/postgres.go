@@ -403,31 +403,38 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	if parsed.IsCacheable() {
 		cached, flags, ok := p.cache.Get(parsed.Query)
 		if ok {
-			// Handle stale data with background refresh
-			if flags == cache.FlagRefresh {
-				// First stale access - trigger background refresh
-				go p.refreshQueryInBackground(parsed.Query, parsed.TTL, db)
+			if flags == cache.FlagFresh {
+				// Fresh cache hit - serve immediately
+				metrics.CacheHits.WithLabelValues(file, line).Inc()
+				metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
+				metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+				state.lastBackend = "cache"
+				state.lastCacheHit = true
+				if _, err := client.Write(cached); err != nil {
+					log.Printf("[PostgreSQL] Cache response error: %v", err)
+				}
+				return
 			}
-			// Serve from cache (fresh or stale)
-			metrics.CacheHits.WithLabelValues(file, line).Inc()
-			metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
-			metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
-			backend := "cache"
-			if flags != cache.FlagFresh {
-				backend = "cache (stale)"
+			if flags == cache.FlagStale {
+				// Stale but another request is already refreshing - serve stale
+				metrics.CacheHits.WithLabelValues(file, line).Inc()
+				metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
+				metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+				state.lastBackend = "cache (stale)"
+				state.lastCacheHit = true
+				if _, err := client.Write(cached); err != nil {
+					log.Printf("[PostgreSQL] Cache response error: %v", err)
+				}
+				return
 			}
-			state.lastBackend = backend
-			state.lastCacheHit = true
 
-			if _, err := client.Write(cached); err != nil {
-				log.Printf("[PostgreSQL] Cache response error: %v", err)
-			}
-			return
+			// FlagRefresh: First stale access - this request does the refresh (sync)
+			// Fall through to query backend below
 		}
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
 
-		// Cold cache: use single-flight pattern
+		// Cold cache or stale refresh: use single-flight pattern
 		cached, _, ok, waited := p.cache.GetOrWait(parsed.Query)
 		if waited && ok {
 			// Another goroutine fetched it for us
@@ -534,46 +541,6 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	if _, err := client.Write(response.Bytes()); err != nil {
 		log.Printf("[PostgreSQL] Client write error: %v", err)
 	}
-}
-
-// refreshQueryInBackground refreshes a stale cache entry.
-// Called when cache.FlagRefresh is returned (first stale access).
-func (p *Proxy) refreshQueryInBackground(query string, ttl int, db *sql.DB) {
-	parsed := parser.Parse(query)
-	rows, err := db.Query(parsed.Query)
-	if err != nil {
-		log.Printf("[PostgreSQL] Background refresh failed for query: %v", err)
-		return
-	}
-	defer rows.Close()
-
-	// Build response
-	var response bytes.Buffer
-	cols, _ := rows.Columns()
-	if len(cols) > 0 {
-		response.Write(p.buildRowDescription(cols))
-
-		values := make([]interface{}, len(cols))
-		valuePtrs := make([]interface{}, len(cols))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-
-		rowCount := 0
-		for rows.Next() {
-			rows.Scan(valuePtrs...)
-			response.Write(p.buildDataRow(values))
-			rowCount++
-		}
-		response.Write(p.encodeMessage(msgCommandComplete, []byte(fmt.Sprintf("SELECT %d", rowCount))))
-	} else {
-		// No results
-		response.Write(p.encodeMessage(msgCommandComplete, []byte("SELECT 0")))
-	}
-	response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
-
-	// Final set in cache - use the passed TTL
-	p.cache.Set(parsed.Query, response.Bytes(), time.Duration(ttl)*time.Second)
 }
 
 func (p *Proxy) buildRowDescription(cols []string) []byte {
