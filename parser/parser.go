@@ -21,6 +21,7 @@ const (
 type ParsedQuery struct {
 	Type  QueryType
 	TTL   int    // TTL in seconds, 0 means no caching
+	DB    string // Database name from FQN
 	File  string // Source file from hint
 	Line  int    // Source line from hint
 	Query string // Original query
@@ -31,6 +32,8 @@ var (
 	hintRegex = regexp.MustCompile(`/\*\s*(ttl:(\d+))?\s*(file:(\S+))?\s*(line:(\d+))?\s*\*/`)
 	// Match query type (allows comments before keyword)
 	queryTypeRegex = regexp.MustCompile(`(?i)\b(SELECT|INSERT|UPDATE|DELETE)\b`)
+	// Match Fully Qualified Names (FQN) like db.table or `db`.`table`
+	fqnRegex = regexp.MustCompile("(?i)\\b(?:FROM|JOIN|INTO|UPDATE)\\s+(['\"`]?)([a-zA-Z0-9_$]+)['\"`]?\\s*\\.\\s*(['\"`]?)([a-zA-Z0-9_$]+)['\"`]?")
 	// Match string literals
 	stringLiteralRegex = regexp.MustCompile(`'[^']*'|"[^"]*"`)
 	// Match numbers
@@ -42,6 +45,25 @@ func Parse(query string) *ParsedQuery {
 	p := &ParsedQuery{
 		Query: query,
 		Type:  QueryUnknown,
+	}
+
+	// Determine query type
+	if matches := queryTypeRegex.FindStringSubmatch(query); matches != nil {
+		switch strings.ToUpper(matches[1]) {
+		case "SELECT":
+			p.Type = QuerySelect
+		case "INSERT":
+			p.Type = QueryInsert
+		case "UPDATE":
+			p.Type = QueryUpdate
+		case "DELETE":
+			p.Type = QueryDelete
+		}
+	}
+
+	// Extract database from FQN
+	if matches := fqnRegex.FindStringSubmatch(query); matches != nil {
+		p.DB = matches[2]
 	}
 
 	// Extract hints from comments
@@ -58,20 +80,6 @@ func Parse(query string) *ParsedQuery {
 		// Remove the hint comment from the query
 		p.Query = hintRegex.ReplaceAllString(query, "")
 		p.Query = strings.TrimSpace(p.Query)
-	}
-
-	// Determine query type
-	if matches := queryTypeRegex.FindStringSubmatch(query); matches != nil {
-		switch strings.ToUpper(matches[1]) {
-		case "SELECT":
-			p.Type = QuerySelect
-		case "INSERT":
-			p.Type = QueryInsert
-		case "UPDATE":
-			p.Type = QueryUpdate
-		case "DELETE":
-			p.Type = QueryDelete
-		}
 	}
 
 	return p

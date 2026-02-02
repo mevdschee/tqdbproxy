@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/mevdschee/tqdbproxy/config"
 	"github.com/mevdschee/tqdbproxy/replica"
@@ -23,15 +24,14 @@ func mockBackend(t *testing.T, addr string) (net.Listener, string, chan bool) {
 	actualAddr := l.Addr().String()
 	stop := make(chan bool)
 	go func() {
+		<-stop
+		l.Close() // Close listener to unblock Accept()
+	}()
+	go func() {
 		for {
 			conn, err := l.Accept()
 			if err != nil {
-				select {
-				case <-stop:
-					return
-				default:
-					continue
-				}
+				return // Listener closed
 			}
 			go handleMockConn(conn)
 		}
@@ -87,6 +87,7 @@ func handleMockConn(conn net.Conn) {
 	// 4. Handle commands
 	for {
 		header := make([]byte, 4)
+		conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		if _, err := conn.Read(header); err != nil {
 			return
 		}
@@ -266,5 +267,171 @@ func TestInitialHandshake(t *testing.T) {
 
 	if conn.user != "tqdbproxy" {
 		t.Errorf("Expected user tqdbproxy, got %s", conn.user)
+	}
+}
+func TestSharding_Use(t *testing.T) {
+	// Setup two mock backends
+	l1, addr1, stop1 := mockBackend(t, "127.0.0.1:0")
+	defer l1.Close()
+	defer func() { stop1 <- true }()
+	l2, addr2, stop2 := mockBackend(t, "127.0.0.1:0")
+	defer l2.Close()
+	defer func() { stop2 <- true }()
+
+	// Setup Proxy with sharding config
+	pcfg := config.ProxyConfig{
+		Default: "main",
+		DBMap: map[string]string{
+			"shard_db": "shard1",
+		},
+	}
+	pools := map[string]*replica.Pool{
+		"main":   replica.NewPool(addr1, nil),
+		"shard1": replica.NewPool(addr2, nil),
+	}
+	proxy := New(pcfg, pools, nil)
+
+	// Create a mock clientConn
+	conn1, _ := net.Dial("tcp", addr1)
+	clientRemote, clientLocal := net.Pipe()
+	defer clientRemote.Close()
+	defer clientLocal.Close()
+
+	// Background client to respond to auth switch
+	go func() {
+		for {
+			header := make([]byte, 4)
+			if _, err := io.ReadFull(clientRemote, header); err != nil {
+				return
+			}
+			length := int(uint32(header[0]) | uint32(header[1])<<(8) | uint32(header[2])<<(16))
+			payload := make([]byte, length)
+			if _, err := io.ReadFull(clientRemote, payload); err != nil {
+				return
+			}
+			if len(payload) > 0 && payload[0] == 0xFE { // Auth Switch
+				resp := []byte{0x00, 0x00, 0x00, 0x00}
+				packet := make([]byte, 4+len(resp))
+				binary.LittleEndian.PutUint32(packet[0:4], uint32(len(resp)))
+				packet[3] = header[3] + 1
+				copy(packet[4:], resp)
+				clientRemote.Write(packet)
+			}
+		}
+	}()
+
+	c := &clientConn{
+		conn:        clientLocal,
+		backend:     conn1,
+		backendPool: pools["main"],
+		backendAddr: addr1,
+		proxy:       proxy,
+		connID:      1,
+		user:        "tqdbproxy",
+		db:          "testdb",
+		rawAuthPkt:  []byte{0x00, 0x00, 0x00, 0x00},
+	}
+
+	// Test USE shard_db
+	err := c.handleQuery("USE shard_db")
+
+	// Close clientRemote to unblock the mock client goroutine
+	clientRemote.Close()
+
+	if err != nil {
+		t.Fatalf("USE shard_db failed: %v", err)
+	}
+
+	if c.backendPool != pools["shard1"] {
+		t.Error("Expected to switch to shard1 pool after USE")
+	}
+}
+
+func TestSharding_FQN(t *testing.T) {
+	// Setup two mock backends
+	l1, addr1, stop1 := mockBackend(t, "127.0.0.1:0")
+	defer l1.Close()
+	defer func() { stop1 <- true }()
+	l2, addr2, stop2 := mockBackend(t, "127.0.0.1:0")
+	defer l2.Close()
+	defer func() { stop2 <- true }()
+
+	// Setup Proxy with sharding config
+	pcfg := config.ProxyConfig{
+		Default: "main",
+		DBMap: map[string]string{
+			"shard_db": "shard1",
+		},
+	}
+	pools := map[string]*replica.Pool{
+		"main":   replica.NewPool(addr1, nil),
+		"shard1": replica.NewPool(addr2, nil),
+	}
+	proxy := New(pcfg, pools, nil)
+
+	// Create a mock clientConn
+	conn1, _ := net.Dial("tcp", addr1)
+	clientRemote, clientLocal := net.Pipe()
+	defer clientRemote.Close()
+	defer clientLocal.Close()
+
+	// Background client to respond to auth switch
+	go func() {
+		for {
+			header := make([]byte, 4)
+			if _, err := io.ReadFull(clientRemote, header); err != nil {
+				return
+			}
+			length := int(uint32(header[0]) | uint32(header[1])<<(8) | uint32(header[2])<<(16))
+			payload := make([]byte, length)
+			if _, err := io.ReadFull(clientRemote, payload); err != nil {
+				return
+			}
+			if len(payload) > 0 {
+				if payload[0] == 0xFE { // Auth Switch
+					resp := []byte{0x00, 0x00, 0x00, 0x00}
+					packet := make([]byte, 4+len(resp))
+					binary.LittleEndian.PutUint32(packet[0:4], uint32(len(resp)))
+					packet[3] = header[3] + 1
+					copy(packet[4:], resp)
+					clientRemote.Write(packet)
+				} else {
+					// Respond with a dummy result set for the query
+					// [len 3] [seq] [col count 1]
+					// [len 3] [seq] [col def]
+					// [len 3] [seq] [EOF]
+					// [len 3] [seq] [OK]
+					ok := []byte{0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}
+					ok[3] = header[3] + 1
+					clientRemote.Write(ok)
+				}
+			}
+		}
+	}()
+
+	c := &clientConn{
+		conn:        clientLocal,
+		backend:     conn1,
+		backendPool: pools["main"],
+		backendAddr: addr1,
+		proxy:       proxy,
+		connID:      1,
+		user:        "tqdbproxy",
+		db:          "testdb",
+		rawAuthPkt:  []byte{0x00, 0x00, 0x00, 0x00},
+	}
+
+	// Test FQN query
+	err := c.handleQuery("UPDATE shard_db.test_table SET val=1")
+
+	// Close clientRemote to unblock the mock client goroutine
+	clientRemote.Close()
+
+	if err != nil {
+		t.Fatalf("FQN query failed: %v", err)
+	}
+
+	if c.backendPool != pools["shard1"] {
+		t.Error("Expected to switch to shard1 pool after FQN query")
 	}
 }

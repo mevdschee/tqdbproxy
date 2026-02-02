@@ -580,6 +580,14 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 	queryUpper := strings.ToUpper(strings.TrimSpace(parsed.Query))
 	queryUpper = strings.TrimSuffix(queryUpper, ";")
 
+	// Check for FQN-based sharding
+	if parsed.DB != "" && parsed.DB != c.db {
+		if err := c.ensureBackend(parsed.DB); err != nil {
+			return err
+		}
+		c.db = parsed.DB
+	}
+
 	// Check for USE statement
 	if strings.HasPrefix(queryUpper, "USE ") {
 		parts := strings.Fields(parsed.Query)
