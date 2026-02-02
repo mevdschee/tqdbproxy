@@ -77,9 +77,9 @@ NB: Ensure: TTL > refresh duration
   a. Write, forward to primary
   b. Transaction, forward to primary
   c. Hint, lookup in local cache
-    1. **Hit**, check if TTL expired (soft)
-      a. No, return cached result
-      b. Yes, check if in-flight
+    1. **Hit**, check if still fresh
+      a. Yes, return cached result
+      b. No, check if in-flight
         1. Yes, return stale data
         2. No, forward to replica pool
     2. **Miss**, check if in-flight
