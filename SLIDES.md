@@ -83,13 +83,15 @@ NB: Ensure: TTL > refresh duration!
 
 ## Query Status Inspection
 
-Custom commands
-- **MariaDB**: SHOW TQDB STATUS;
-- **PostgreSQL**: SELECT * FROM pg_tqdb_status;
+mariadb> SHOW TQDB STATUS;       => SELECT * FROM pg_tqdb_status;
++---------------+---------+       variable_name |  value  
+| Variable_name | Value   |      ---------------+---------
++---------------+---------+       Shard         | main
+| Shard         | main    |       Backend       | primary
+| Backend       | primary |      (2 rows)
++---------------+---------+
 
-Show your last query results
-- **Shard**: main / shard1 / ...
-- **Backend**: primary / replicas[n] / cache
+Backend = primary, replicas[n], cache, cache (stale)
 
 ---
 

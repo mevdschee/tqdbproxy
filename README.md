@@ -72,19 +72,7 @@ mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 ```
 
-**PostgreSQL:**
-```sql
-tqdbproxy=> SELECT * FROM pg_tqdb_status;
- variable_name |  value  
----------------+---------
- Shard         | main
- Backend       | primary
-(2 rows)
-```
-
-Values: `Backend` = `primary`, `replicas[n]`, `cache`, `cache (stale)` or `none` (no query yet).
-
-This is useful for debugging cache behavior during development.
+Backend = primary, replicas[n], cache, cache (stale)
 
 ## Sharding & Replicas
 
