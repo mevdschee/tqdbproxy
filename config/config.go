@@ -16,13 +16,11 @@ type Config struct {
 
 // ProxyConfig holds configuration for a protocol proxy with multiple backends
 type ProxyConfig struct {
-	Listen     string                   // TCP listen address (e.g., ":3307")
-	Socket     string                   // Optional Unix socket path
-	Default    string                   // Name of the default backend
-	BGUser     string                   // Background refresh user (optional)
-	BGPassword string                   // Background refresh password (optional)
-	Backends   map[string]BackendConfig // Backend pool configurations
-	DBMap      map[string]string        // Mapping of database names to backend names
+	Listen   string                   // TCP listen address (e.g., ":3307")
+	Socket   string                   // Optional Unix socket path
+	Default  string                   // Name of the default backend
+	Backends map[string]BackendConfig // Backend pool configurations
+	DBMap    map[string]string        // Mapping of database names to backend names
 }
 
 // BackendConfig holds configuration for a single backend pool (primary + replicas)
@@ -59,13 +57,11 @@ func loadProxyConfig(cfg *ini.File, protocol, defaultListen string) ProxyConfig 
 	sec := cfg.Section(protocol)
 
 	pcfg := ProxyConfig{
-		Listen:     sec.Key("listen").MustString(defaultListen),
-		Socket:     sec.Key("socket").String(),
-		Default:    sec.Key("default").MustString("main"),
-		BGUser:     sec.Key("bg_user").String(),
-		BGPassword: sec.Key("bg_password").String(),
-		Backends:   make(map[string]BackendConfig),
-		DBMap:      make(map[string]string),
+		Listen:   sec.Key("listen").MustString(defaultListen),
+		Socket:   sec.Key("socket").String(),
+		Default:  sec.Key("default").MustString("main"),
+		Backends: make(map[string]BackendConfig),
+		DBMap:    make(map[string]string),
 	}
 
 	// Find all backends for this protocol [protocol.name]
