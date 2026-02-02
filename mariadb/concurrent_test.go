@@ -92,6 +92,7 @@ func TestConcurrentTransactions(t *testing.T) {
 				tx, err := db.Begin()
 				if err != nil {
 					atomic.AddInt64(&errorCount, 1)
+					t.Logf("Worker %d BEGIN failed: %v", workerID, err)
 					continue
 				}
 
@@ -99,11 +100,13 @@ func TestConcurrentTransactions(t *testing.T) {
 				if err != nil {
 					tx.Rollback()
 					atomic.AddInt64(&errorCount, 1)
+					t.Logf("Worker %d query failed: %v", workerID, err)
 					continue
 				}
 
 				if err := tx.Commit(); err != nil {
 					atomic.AddInt64(&errorCount, 1)
+					t.Logf("Worker %d COMMIT failed: %v", workerID, err)
 					continue
 				}
 				atomic.AddInt64(&successCount, 1)

@@ -1,7 +1,7 @@
 package mariadb
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/binary"
@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/mevdschee/tqdbproxy/cache"
 	"github.com/mevdschee/tqdbproxy/config"
 	"github.com/mevdschee/tqdbproxy/metrics"
@@ -26,27 +26,18 @@ import (
 )
 
 const (
-	comQuery       = 0x03
-	comQuit        = 0x01
-	comInitDB      = 0x02
-	comFieldList   = 0x04
-	comPing        = 0x0e
-	comStmtPrepare = 0x16
-	comStmtExecute = 0x17
-	comStmtClose   = 0x19
-	comStmtReset   = 0x1a
-
 	backendTimeout = 30 * time.Second
 )
 
 // Proxy implements a MariaDB server that forwards to backend
 type Proxy struct {
-	config config.ProxyConfig
-	pools  map[string]*replica.Pool
-	cache  *cache.Cache
-	db     *sql.DB
-	connID uint32 // Managed atomically
-	mu     sync.RWMutex
+	config    config.ProxyConfig
+	pools     map[string]*replica.Pool
+	cache     *cache.Cache
+	db        *sql.DB
+	connID    uint32 // Managed atomically
+	listeners []net.Listener
+	mu        sync.RWMutex
 }
 
 // New creates a new MariaDB proxy
@@ -97,6 +88,7 @@ func (p *Proxy) Start() error {
 	if err != nil {
 		return err
 	}
+	p.listeners = append(p.listeners, tcpListener)
 	log.Printf("[MariaDB] Listening on %s (tcp), forwarding to %v backends", listen, len(p.pools))
 
 	go p.acceptLoop(tcpListener)
@@ -111,6 +103,7 @@ func (p *Proxy) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to listen on unix socket: %v", err)
 		}
+		p.listeners = append(p.listeners, unixListener)
 		log.Printf("[MariaDB] Listening on %s (unix)", socket)
 		go p.acceptLoop(unixListener)
 	}
@@ -118,10 +111,40 @@ func (p *Proxy) Start() error {
 	return nil
 }
 
+// Stop closes all listeners and the database connection
+func (p *Proxy) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var errs []error
+	for _, listener := range p.listeners {
+		if err := listener.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	p.listeners = nil
+
+	if p.db != nil {
+		if err := p.db.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		p.db = nil
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors during shutdown: %v", errs)
+	}
+	return nil
+}
+
 func (p *Proxy) acceptLoop(listener net.Listener) {
 	for {
 		client, err := listener.Accept()
 		if err != nil {
+			// Check if listener was closed
+			if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+				return
+			}
 			log.Printf("[MariaDB] Accept error: %v", err)
 			continue
 		}
@@ -137,43 +160,35 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	defaultPool := p.pools[p.config.Default]
 	p.mu.RUnlock()
 
-	// Connect to default backend FIRST to get its salt
-	addr := defaultPool.GetPrimary()
-	network := "tcp"
-	dialAddr := addr
-	if len(addr) > 5 && addr[:5] == "unix:" {
-		network = "unix"
-		dialAddr = addr[5:]
-	}
-
-	backend, err := net.Dial(network, dialAddr)
-	if err != nil {
-		log.Printf("[MariaDB] Failed to connect to backend for conn %d: %v", connID, err)
-		return
-	}
-	defer backend.Close()
-
 	conn := &clientConn{
 		conn:               client,
-		backend:            backend,
 		backendPool:        defaultPool,
-		backendAddr:        dialAddr,
-		backendName:        "primary",
 		proxy:              p,
 		connID:             connID,
 		capability:         0,
-		status:             SERVER_STATUS_AUTOCOMMIT,
+		status:             mysql.StatusInAutocommit,
 		sequence:           0,
 		preparedStatements: make(map[uint32]string),
 	}
 
-	// Perform handshake with salt forwarding
-	if err := conn.handshake(); err != nil {
-		log.Printf("[MariaDB] Handshake error (conn %d): %v", connID, err)
+	// For the initial connection, we don't have the username yet.
+	// We must first read the client auth packet to get the username.
+	// But to get the client auth packet, we first need to send a greeting with a salt.
+	// So we connect to the backend FIRST to get its salt.
+
+	addr := defaultPool.GetPrimary()
+	backend, err := conn.dialAndAuth(addr)
+	if err != nil {
+		log.Printf("[MariaDB] Initial connection/auth error (conn %d): %v", connID, err)
 		return
 	}
+	defer backend.Close()
 
-	// Handle commands
+	conn.backend = backend
+	conn.backendAddr = addr
+	conn.backendName = "primary"
+
+	// Successfully authenticated both client and backend
 	conn.run()
 }
 
@@ -184,8 +199,8 @@ type clientConn struct {
 	backendPool *replica.Pool
 	proxy       *Proxy
 	connID      uint32
-	capability  uint32
-	status      uint16
+	capability  mysql.CapabilityFlag
+	status      mysql.StatusFlag
 	sequence    byte
 	backendSeq  byte // Sequence number for backend
 	salt        []byte
@@ -207,190 +222,10 @@ type clientConn struct {
 	preparedStatements map[uint32]string
 }
 
-func (c *clientConn) handshake() error {
-	// Step 1: Read backend's greeting to get its salt
-	backendGreeting, err := c.readBackendPacket()
-	if err != nil {
-		return fmt.Errorf("failed to read backend greeting: %v", err)
-	}
-
-	// Parse backend greeting to extract salt (for our internal use)
-	if len(backendGreeting) < 44 {
-		return fmt.Errorf("backend greeting too short")
-	}
-
-	// Skip protocol version (1 byte) and version string (null-terminated)
-	pos := 1
-	for pos < len(backendGreeting) && backendGreeting[pos] != 0 {
-		pos++
-	}
-	pos++ // skip null terminator
-
-	// Skip connection ID (4 bytes)
-	pos += 4
-
-	// Auth plugin data part 1 (8 bytes) = salt[0:8]
-	salt1 := backendGreeting[pos : pos+8]
-	pos += 8
-
-	// Skip filler (1 byte)
-	pos++
-
-	// Step 1b: Strip CLIENT_SSL from backend greeting lower capabilities (bit 11)
-	// We do this so the client doesn't try to negotiate TLS with the proxy.
-	backendGreeting[pos] &= ^byte(0)      // bits 0-7
-	backendGreeting[pos+1] &= ^byte(0x08) // bits 8-15 (0x0800 is bit 11)
-
-	// Skip capability flags lower (2 bytes), charset (1), status (2), cap upper (2)
-	pos += 7
-
-	// Auth plugin data length (1 byte)
-	authDataLen := int(backendGreeting[pos])
-	pos++
-
-	// Skip reserved (10 bytes)
-	pos += 10
-
-	// Auth plugin data part 2 (remaining of 21 bytes)
-	var salt2 []byte
-	if authDataLen > 8 && pos+12 <= len(backendGreeting) {
-		salt2 = backendGreeting[pos : pos+12]
-	}
-
-	// Combine salt parts (for internal use)
-	c.salt = make([]byte, 20)
-	copy(c.salt[0:8], salt1)
-	if len(salt2) >= 12 {
-		copy(c.salt[8:20], salt2)
-	}
-
-	// Step 2: Forward the backend's greeting directly to the client
-	// This ensures client sees exact capabilities backend expects
-	greetingPacket := make([]byte, 4+len(backendGreeting))
-	binary.LittleEndian.PutUint32(greetingPacket[0:4], uint32(len(backendGreeting)))
-	greetingPacket[3] = c.sequence
-	copy(greetingPacket[4:], backendGreeting)
-	if _, err := c.conn.Write(greetingPacket); err != nil {
-		return err
-	}
-	c.sequence++
-
-	// Initialize shard name for status
-	c.lastQueryShard = c.proxy.config.Default
-
-	// Step 3: Read client auth response
-	if err := c.readClientAuth(); err != nil {
-		return err
-	}
-
-	// Step 4: Forward client auth to backend
-	if err := c.forwardClientAuth(); err != nil {
-		return err
-	}
-
-	// Step 5: Read backend's auth response
-	backendResponse, err := c.readBackendPacket()
-	if err != nil {
-		return fmt.Errorf("failed to read backend auth response: %v", err)
-	}
-
-	// Check if auth succeeded (OK packet starts with 0x00, Error with 0xFF)
-	if len(backendResponse) > 0 && backendResponse[0] == 0xFF {
-		// Forward error to client with proper packet header
-		c.sequence++
-		length := len(backendResponse)
-		packet := make([]byte, 4+length)
-		packet[0] = byte(length)
-		packet[1] = byte(length >> 8)
-		packet[2] = byte(length >> 16)
-		packet[3] = c.sequence
-		copy(packet[4:], backendResponse)
-		c.conn.Write(packet)
-		return fmt.Errorf("backend auth failed")
-	}
-
-	// Check for auth switch request (0xFE)
-	if len(backendResponse) > 0 && backendResponse[0] == 0xFE {
-		return fmt.Errorf("auth switch request not supported")
-	}
-
-	// Step 6: Forward OK response to client
-	if len(backendResponse) > 0 && backendResponse[0] == 0x00 {
-		// OK packet: 00 <lenenc_rows> <lenenc_id> <status_flags(2)>
-		statusOffset := 1
-		_, _, n1 := ReadLengthEncodedInt(backendResponse[statusOffset:])
-		statusOffset += n1
-		_, _, n2 := ReadLengthEncodedInt(backendResponse[statusOffset:])
-		statusOffset += n2
-		if len(backendResponse) >= statusOffset+2 {
-			c.status = binary.LittleEndian.Uint16(backendResponse[statusOffset:])
-		}
-	}
-
-	c.sequence++
-	okPacket := make([]byte, 4+len(backendResponse))
-	okPacket[0] = byte(len(backendResponse))
-	okPacket[1] = byte(len(backendResponse) >> 8)
-	okPacket[2] = byte(len(backendResponse) >> 16)
-	okPacket[3] = c.sequence
-	copy(okPacket[4:], backendResponse)
-	if _, err := c.conn.Write(okPacket); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (c *clientConn) writeServerGreeting() error {
-	data := make([]byte, 4, 128)
-
-	// Protocol version
-	data = append(data, 10)
-
-	// Server version
-	data = append(data, ServerVersion...)
-	data = append(data, 0)
-
-	// Connection ID
-	data = append(data, byte(c.connID), byte(c.connID>>8), byte(c.connID>>16), byte(c.connID>>24))
-
-	// Auth plugin data part 1 (8 bytes)
-	data = append(data, c.salt[0:8]...)
-
-	// Filler
-	data = append(data, 0)
-
-	// Capability flags lower 2 bytes
-	capLower := uint16(DEFAULT_CAPABILITY & 0xFFFF)
-	data = append(data, byte(capLower), byte(capLower>>8))
-
-	// Character set (utf8mb4_general_ci = 45, or utf8_general_ci = 33)
-	data = append(data, 33)
-
-	// Status flags
-	data = append(data, byte(c.status), byte(c.status>>8))
-
-	// Capability flags upper 2 bytes
-	capUpper := uint16((DEFAULT_CAPABILITY >> 16) & 0xFFFF)
-	data = append(data, byte(capUpper), byte(capUpper>>8))
-
-	// Auth plugin data length
-	data = append(data, 21)
-
-	// Reserved (10 bytes)
-	data = append(data, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-	// Auth plugin data part 2 (12 bytes + null terminator)
-	data = append(data, c.salt[8:20]...)
-	data = append(data, 0)
-
-	// Set packet length and sequence
-	binary.LittleEndian.PutUint32(data[0:4], uint32(len(data)-4))
-	data[3] = c.sequence
-	c.sequence++
-
-	_, err := c.conn.Write(data)
-	return err
+	payload := mysql.WriteHandshakeV10(c.connID, c.salt, c.capability, c.status)
+	c.sequence = 255 // writePacket will increment this to 0
+	return c.writePacket(payload)
 }
 
 func (c *clientConn) readClientAuth() error {
@@ -399,60 +234,16 @@ func (c *clientConn) readClientAuth() error {
 		return err
 	}
 
-	pos := 0
-
-	// Capability flags
-	c.capability = binary.LittleEndian.Uint32(packet[pos : pos+4])
-	pos += 4
-
-	// Max packet size
-	pos += 4
-
-	// Character set
-	pos++
-
-	// Reserved (23 bytes)
-	if pos+23 > len(packet) {
-		return fmt.Errorf("malformed packet: too short for reserved field")
-	}
-	pos += 23
-
-	// Username (null-terminated)
-	if pos >= len(packet) {
-		return fmt.Errorf("malformed packet: too short for username")
-	}
-	nullIdx := bytes.IndexByte(packet[pos:], 0)
-	if nullIdx == -1 {
-		return fmt.Errorf("malformed packet: missing null terminator for username")
-	}
-	user := string(packet[pos : pos+nullIdx])
-	pos += nullIdx + 1
-
-	// Auth response length
-	if pos >= len(packet) {
-		return fmt.Errorf("malformed packet: too short for auth length")
-	}
-	authLen := int(packet[pos])
-	pos++
-
-	// Auth response
-	if pos+authLen > len(packet) {
-		return fmt.Errorf("malformed packet: auth response exceeds packet size")
-	}
-	auth := packet[pos : pos+authLen]
-	pos += authLen
-
-	// Database name (if CLIENT_CONNECT_WITH_DB)
-	if c.capability&CLIENT_CONNECT_WITH_DB > 0 && pos < len(packet) {
-		idx := bytes.IndexByte(packet[pos:], 0)
-		if idx != -1 {
-			c.db = string(packet[pos : pos+idx])
-		}
+	hr, err := mysql.ParseHandshakeResponse(packet)
+	if err != nil {
+		return err
 	}
 
 	// Store username and auth for backend connection
-	c.user = user
-	c.auth = auth
+	c.capability = hr.Capability
+	c.user = hr.User
+	c.auth = hr.Auth
+	c.db = hr.DB
 	c.rawAuthPkt = packet // Store original packet for forwarding
 
 	return nil
@@ -567,8 +358,17 @@ func (c *clientConn) handleLocalInfile(initialResponse []byte, moreResults bool)
 	return c.forwardBackendResponse(finalResponse, moreResults)
 }
 
+func (c *clientConn) writePacket(payload []byte) error {
+	c.sequence++
+	packet := make([]byte, 4+len(payload))
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(payload)))
+	packet[3] = c.sequence
+	copy(packet[4:], payload)
+	_, err := c.conn.Write(packet)
+	return err
+}
+
 func (c *clientConn) dialAndAuth(addr string) (net.Conn, error) {
-	// Re-authenticate
 	network := "tcp"
 	dialAddr := addr
 	if len(addr) > 5 && addr[:5] == "unix:" {
@@ -576,65 +376,98 @@ func (c *clientConn) dialAndAuth(addr string) (net.Conn, error) {
 		dialAddr = addr[5:]
 	}
 
-	newBackend, err := net.DialTimeout(network, dialAddr, backendTimeout)
+	wasAuthenticated := (c.user != "")
+	cfg := mysql.NewConfig()
+	cfg.User = c.user
+	cfg.Net = network
+	cfg.Addr = dialAddr
+	cfg.DBName = c.db
+
+	// Crucial: define the HandleAuth callback to forward the nonce to the client
+	cfg.HandleAuth = func(backendCfg *mysql.Config, plugin string, salt []byte, serverCapabilities uint32) ([]byte, error) {
+		if c.user == "" {
+			// This is the INITIAL handshake.
+			// We need to send the Server Greeting to the client with this salt.
+			c.salt = salt
+			c.capability = mysql.CapabilityFlag(serverCapabilities & ^uint32(mysql.ClientSSL|mysql.ClientDeprecateEOF)) // Strip SSL and DeprecateEOF from backend capabilities
+			if err := c.writeServerGreeting(); err != nil {
+				return nil, err
+			}
+			// Then read the client's auth response.
+			if err := c.readClientAuth(); err != nil {
+				return nil, err
+			}
+			// IMPORTANT: Update the backend config with the username we just got from the client
+			backendCfg.User = c.user
+			// The driver expects the auth response body.
+			return c.auth, nil
+		} else {
+			// This is a SHARD SWITCH.
+			// The client is already connected and authenticated once.
+			// We need to send an Auth Switch Request (0xFE) to the client.
+			// https://mariadb.com/kb/en/connection/#auth-switch-request
+			payload := make([]byte, 1+len(plugin)+1+len(salt))
+			payload[0] = 0xFE
+			copy(payload[1:], plugin)
+			payload[1+len(plugin)] = 0
+			copy(payload[1+len(plugin)+1:], salt)
+
+			// Send to client
+			if err := c.writePacket(payload); err != nil {
+				return nil, err
+			}
+
+			// Read response from client
+			resp, err := c.readPacket()
+			if err != nil {
+				return nil, err
+			}
+			return resp, nil
+		}
+	}
+
+	connector, err := mysql.NewConnector(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to backend: %v", err)
-	}
-
-	// Read greeting from backend
-	header := make([]byte, 4)
-	newBackend.SetReadDeadline(time.Now().Add(backendTimeout))
-	if _, err := io.ReadFull(newBackend, header); err != nil {
-		newBackend.Close()
-		return nil, fmt.Errorf("failed to read greeting from backend: %v", err)
-	}
-	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(newBackend, payload); err != nil {
-		newBackend.Close()
 		return nil, err
 	}
 
-	// Forward original auth to backend
-	seq := header[3] + 1
-	packet := make([]byte, 4+len(c.rawAuthPkt))
-	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(c.rawAuthPkt)))
-	packet[3] = seq
-	copy(packet[4:], c.rawAuthPkt)
-	newBackend.SetWriteDeadline(time.Now().Add(backendTimeout))
-	if _, err := newBackend.Write(packet); err != nil {
-		newBackend.Close()
+	// connect using the driver
+	dbConn, err := connector.Connect(context.Background())
+	if err != nil {
 		return nil, err
 	}
 
-	// Read auth response
-	newBackend.SetReadDeadline(time.Now().Add(backendTimeout))
-	if _, err := io.ReadFull(newBackend, header); err != nil {
-		newBackend.Close()
-		return nil, err
-	}
-	length = int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
-	payload = make([]byte, length)
-	if _, err := io.ReadFull(newBackend, payload); err != nil {
-		newBackend.Close()
-		return nil, err
+	// After successful Connect, we have the auth OK from backend.
+	// But we still need to send the OK packet to the client if this was a shard switch
+	// or if the driver didn't send it yet.
+	// Actually, for the initial handshake, the driver handles the handshake response.
+	// If it's a switch, we might need to send OK to the client.
+
+	// If this was the initial handshake (c.user was empty before dialAndAuth),
+	// we need to send the final OK packet to the client to complete the handshake.
+	// For shard switches, the client is waiting for the result of the command that triggered the switch.
+	if !wasAuthenticated {
+		if err := c.writeOK(); err != nil {
+			dbConn.Close()
+			return nil, err
+		}
 	}
 
-	if len(payload) > 0 && payload[0] == 0xFF {
-		newBackend.Close()
-		return nil, fmt.Errorf("backend auth failed")
+	// Get the raw connection from the driver
+	raw := mysql.GetRawConn(dbConn)
+	if raw == nil {
+		dbConn.Close()
+		return nil, fmt.Errorf("failed to get raw connection from driver")
 	}
 
-	// Reset deadlines
-	newBackend.SetDeadline(time.Time{})
-	return newBackend, nil
+	return raw, nil
 }
 
 func (c *clientConn) dispatch(cmd byte, data []byte) error {
 	switch cmd {
-	case comQuit:
+	case mysql.ComQuit:
 		return io.EOF
-	case comInitDB:
+	case mysql.ComInitDB:
 		c.mu.Lock()
 		dbName := string(data)
 		if err := c.ensureBackend(dbName); err != nil {
@@ -649,27 +482,27 @@ func (c *clientConn) dispatch(cmd byte, data []byte) error {
 			return err
 		}
 		return c.writeOK()
-	case comFieldList:
+	case mysql.ComFieldList:
 		// COM_FIELD_LIST is deprecated and used for table completion
 		// Just return EOF to indicate no fields (client will fall back to other methods)
 		return c.writeEOF()
-	case comPing:
+	case mysql.ComPing:
 		return c.writeOK()
-	case comQuery:
+	case mysql.ComQuery:
 		return c.handleQuery(string(data))
-	case comStmtPrepare:
+	case mysql.ComStmtPrepare:
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.handlePrepare(string(data))
-	case comStmtExecute:
+	case mysql.ComStmtExecute:
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.handleExecute(data)
-	case comStmtClose:
+	case mysql.ComStmtClose:
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.handleStmtClose(data)
-	case comStmtReset:
+	case mysql.ComStmtReset:
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.handleStmtReset(data)
@@ -683,7 +516,7 @@ func (c *clientConn) handleBegin(moreResults bool) error {
 	if err != nil {
 		return err
 	}
-	c.status |= SERVER_STATUS_IN_TRANS
+	c.status |= mysql.StatusInTrans
 	return c.writeOKWithInfo("", moreResults)
 }
 
@@ -692,7 +525,7 @@ func (c *clientConn) handleCommit(moreResults bool) error {
 	if err != nil {
 		return err
 	}
-	c.status &= ^uint16(SERVER_STATUS_IN_TRANS)
+	c.status &= ^mysql.StatusInTrans
 	return c.writeOKWithInfo("", moreResults)
 }
 
@@ -701,7 +534,7 @@ func (c *clientConn) handleRollback(moreResults bool) error {
 	if err != nil {
 		return err
 	}
-	c.status &= ^uint16(SERVER_STATUS_IN_TRANS)
+	c.status &= ^mysql.StatusInTrans
 	return c.writeOKWithInfo("", moreResults)
 }
 
@@ -817,7 +650,7 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 	backendAddr := c.backendPool.GetPrimary()
 	backendName := "primary"
 
-	if parsed.IsCacheable() && (c.status&SERVER_STATUS_IN_TRANS == 0) {
+	if parsed.IsCacheable() && (c.status&mysql.StatusInTrans == 0) {
 		backendAddr, backendName = c.backendPool.GetReplica()
 	}
 	// Ensure we are connected to the right backend
@@ -863,7 +696,7 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 func (c *clientConn) handlePrepare(query string) error {
 	// 1. Forward COM_STMT_PREPARE to backend
 	payload := make([]byte, 1+len(query))
-	payload[0] = comStmtPrepare
+	payload[0] = mysql.ComStmtPrepare
 	copy(payload[1:], query)
 
 	c.backendSeq = 255
@@ -969,7 +802,7 @@ func (c *clientConn) refreshQueryInBackground(query string, ttl int) {
 func (c *clientConn) execQueryOnConn(conn net.Conn, query string) ([]byte, error) {
 	// Build COM_QUERY packet
 	payload := make([]byte, 1+len(query))
-	payload[0] = comQuery
+	payload[0] = mysql.ComQuery
 	copy(payload[1:], query)
 
 	// Send packet
@@ -1062,7 +895,7 @@ func (c *clientConn) handleExecute(data []byte) error {
 
 	// Forward COM_STMT_EXECUTE to backend
 	payload := make([]byte, 1+len(data))
-	payload[0] = comStmtExecute
+	payload[0] = mysql.ComStmtExecute
 	copy(payload[1:], data)
 
 	c.backendSeq = 255
@@ -1098,7 +931,7 @@ func (c *clientConn) handleStmtClose(data []byte) error {
 	}
 
 	payload := make([]byte, 1+len(data))
-	payload[0] = comStmtClose
+	payload[0] = mysql.ComStmtClose
 	copy(payload[1:], data)
 
 	c.backendSeq = 255
@@ -1107,7 +940,7 @@ func (c *clientConn) handleStmtClose(data []byte) error {
 
 func (c *clientConn) handleStmtReset(data []byte) error {
 	payload := make([]byte, 1+len(data))
-	payload[0] = comStmtReset
+	payload[0] = mysql.ComStmtReset
 	copy(payload[1:], data)
 
 	c.backendSeq = 255
@@ -1151,13 +984,13 @@ func (c *clientConn) execBackendResponse() ([]byte, error) {
 				}
 				// Otherwise, treat as OK packet
 				statusOffset := 1
-				_, _, n1 := ReadLengthEncodedInt(packet[statusOffset:])
+				_, _, n1 := mysql.ReadLengthEncodedInteger(packet[statusOffset:])
 				statusOffset += n1
-				_, _, n2 := ReadLengthEncodedInt(packet[statusOffset:])
+				_, _, n2 := mysql.ReadLengthEncodedInteger(packet[statusOffset:])
 				statusOffset += n2
 				if len(packet) >= statusOffset+2 {
 					status := binary.LittleEndian.Uint16(packet[statusOffset:])
-					if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+					if status&uint16(mysql.StatusMoreResultsExists) == 0 {
 						return response, nil
 					}
 					eofCount = 0
@@ -1178,7 +1011,7 @@ func (c *clientConn) execBackendResponse() ([]byte, error) {
 						// Checked for more results in EOF as well
 						if len(packet) >= 5 {
 							status := binary.LittleEndian.Uint16(packet[3:])
-							if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+							if status&uint16(mysql.StatusMoreResultsExists) == 0 {
 								return response, nil
 							}
 							eofCount = 0
@@ -1203,7 +1036,7 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 	// Column count packet
 	colCount := len(columns)
 	packet := make([]byte, 4)
-	packet = append(packet, PutLengthEncodedInt(uint64(colCount))...)
+	packet = append(packet, mysql.AppendLengthEncodedInteger(nil, uint64(colCount))...)
 	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
 	c.sequence++
 	packet[3] = c.sequence
@@ -1216,7 +1049,7 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 		packet = append(packet, 0)                   // database
 		packet = append(packet, 0)                   // table
 		packet = append(packet, 0)                   // org_table
-		packet = append(packet, PutLengthEncodedInt(uint64(len(col)))...)
+		packet = append(packet, mysql.AppendLengthEncodedInteger(nil, uint64(len(col)))...)
 		packet = append(packet, []byte(col)...)
 		packet = append(packet, 0)                      // org_name
 		packet = append(packet, 0x0c)                   // length of fixed fields
@@ -1235,7 +1068,7 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 
 	// EOF packet after columns
 	c.sequence++
-	eofPacket := WriteEOFPacket(c.status, c.capability)
+	eofPacket := mysql.WriteEOFPacket(c.status, c.capability)
 	eofPacket[3] = c.sequence
 	result = append(result, eofPacket...)
 
@@ -1264,7 +1097,7 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 				default:
 					str = fmt.Sprintf("%v", v)
 				}
-				packet = append(packet, PutLengthEncodedInt(uint64(len(str)))...)
+				packet = append(packet, mysql.AppendLengthEncodedInteger(nil, uint64(len(str)))...)
 				packet = append(packet, []byte(str)...)
 			}
 		}
@@ -1277,7 +1110,7 @@ func (c *clientConn) buildResultSet(rows *sql.Rows) ([]byte, error) {
 
 	// EOF packet after rows
 	c.sequence++
-	eofPacket = WriteEOFPacket(c.status, c.capability)
+	eofPacket = mysql.WriteEOFPacket(c.status, c.capability)
 	eofPacket[3] = c.sequence
 	result = append(result, eofPacket...)
 
@@ -1330,6 +1163,7 @@ func (c *clientConn) writeBackendPacket(payload []byte) error {
 	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(payload)))
 	packet[3] = c.backendSeq
 	copy(packet[4:], payload)
+
 	c.backend.SetWriteDeadline(time.Now().Add(backendTimeout))
 	_, err := c.backend.Write(packet)
 	c.backend.SetWriteDeadline(time.Time{})
@@ -1351,7 +1185,7 @@ func (c *clientConn) forwardClientAuth() error {
 func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 	// Build COM_QUERY packet
 	payload := make([]byte, 1+len(query))
-	payload[0] = comQuery
+	payload[0] = mysql.ComQuery
 	copy(payload[1:], query)
 
 	// Reset backend sequence for new command
@@ -1384,13 +1218,13 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 				// OK packet: 00 <lenenc_rows> <lenenc_id> <status_flags(2)>
 				if eofCount == 0 {
 					statusOffset := 1
-					_, _, n1 := ReadLengthEncodedInt(packet[statusOffset:])
+					_, _, n1 := mysql.ReadLengthEncodedInteger(packet[statusOffset:])
 					statusOffset += n1
-					_, _, n2 := ReadLengthEncodedInt(packet[statusOffset:])
+					_, _, n2 := mysql.ReadLengthEncodedInteger(packet[statusOffset:])
 					statusOffset += n2
 					if len(packet) >= statusOffset+2 {
 						status := binary.LittleEndian.Uint16(packet[statusOffset:])
-						if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+						if status&uint16(mysql.StatusMoreResultsExists) == 0 {
 							return response, nil
 						}
 						// More results coming (e.g. from multi-statement call or procedure)
@@ -1409,7 +1243,7 @@ func (c *clientConn) execBackendQuery(query string) ([]byte, error) {
 						// EOF packet: FE <warnings(2)> <status_flags(2)>
 						if len(packet) >= 5 {
 							status := binary.LittleEndian.Uint16(packet[3:])
-							if status&SERVER_MORE_RESULTS_EXISTS == 0 {
+							if status&uint16(mysql.StatusMoreResultsExists) == 0 {
 								return response, nil
 							}
 							// More results coming
@@ -1450,28 +1284,28 @@ func (c *clientConn) forwardBackendResponse(response []byte, moreResults bool) e
 		pos += 4 + length
 	}
 
-	// If more results follow, set the SERVER_MORE_RESULTS_EXISTS flag in the last packet
+	// If more results follow, set the StatusMoreResultsExists flag in the last packet
 	if moreResults && lastPacketPos < len(respCopy) {
 		packet := respCopy[lastPacketPos:]
 		if len(packet) > 4 {
 			header := packet[4]
-			if header == OK_HEADER {
+			if header == 0x00 { // OK_HEADER
 				// OK packet: 00 <lenenc_rows> <lenenc_id> <status_flags(2)>
 				statusOffset := 5
-				_, _, n1 := ReadLengthEncodedInt(packet[statusOffset:])
+				_, _, n1 := mysql.ReadLengthEncodedInteger(packet[statusOffset:])
 				statusOffset += n1
-				_, _, n2 := ReadLengthEncodedInt(packet[statusOffset:])
+				_, _, n2 := mysql.ReadLengthEncodedInteger(packet[statusOffset:])
 				statusOffset += n2
 				if len(packet) >= statusOffset+2 {
 					status := binary.LittleEndian.Uint16(packet[statusOffset:])
-					status |= SERVER_MORE_RESULTS_EXISTS
+					status |= uint16(mysql.StatusMoreResultsExists)
 					binary.LittleEndian.PutUint16(packet[statusOffset:], status)
 				}
-			} else if header == EOF_HEADER {
+			} else if header == 0xfe { // EOF_HEADER
 				// EOF packet: FE <warnings(2)> <status_flags(2)>
 				if len(packet) >= 9 {
 					status := binary.LittleEndian.Uint16(packet[7:9])
-					status |= SERVER_MORE_RESULTS_EXISTS
+					status |= uint16(mysql.StatusMoreResultsExists)
 					binary.LittleEndian.PutUint16(packet[7:9], status)
 				}
 			}
@@ -1490,36 +1324,52 @@ func (c *clientConn) writeOKWithInfo(info string, moreResults bool) error {
 	c.sequence++
 	status := c.status
 	if moreResults {
-		status |= SERVER_MORE_RESULTS_EXISTS
+		status |= mysql.StatusMoreResultsExists
 	}
-	packet := WriteOKPacket(0, 0, status, c.capability)
-	packet[3] = c.sequence
-	_, err := c.conn.Write(packet)
+	packet := mysql.WriteOKPacket(0, 0, status, c.capability)
+	// Add header
+	payload := make([]byte, 4+len(packet))
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(packet)))
+	payload[3] = c.sequence
+	copy(payload[4:], packet)
+	_, err := c.conn.Write(payload)
 	return err
 }
 
 func (c *clientConn) writeError(e error) error {
 	c.sequence++
-	packet := WriteErrorPacket(1105, "HY000", e.Error(), c.capability)
-	packet[3] = c.sequence
-	_, err := c.conn.Write(packet)
+	packet := mysql.WriteErrorPacket(1105, "HY000", e.Error(), c.capability)
+	// Add header
+	payload := make([]byte, 4+len(packet))
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(packet)))
+	payload[3] = c.sequence
+	copy(payload[4:], packet)
+	_, err := c.conn.Write(payload)
 	return err
 }
 
 func (c *clientConn) writeAuthError(user string) error {
 	c.sequence++
 	msg := fmt.Sprintf("Access denied for user '%s'@'localhost' (using password: YES)", user)
-	packet := WriteErrorPacket(1045, "28000", msg, c.capability)
-	packet[3] = c.sequence
-	_, err := c.conn.Write(packet)
+	packet := mysql.WriteErrorPacket(1045, "28000", msg, c.capability)
+	// Add header
+	payload := make([]byte, 4+len(packet))
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(packet)))
+	payload[3] = c.sequence
+	copy(payload[4:], packet)
+	_, err := c.conn.Write(payload)
 	return err
 }
 
 func (c *clientConn) writeEOF() error {
 	c.sequence++
-	packet := WriteEOFPacket(c.status, c.capability)
-	packet[3] = c.sequence
-	_, err := c.conn.Write(packet)
+	packet := mysql.WriteEOFPacket(c.status, c.capability)
+	// Add header
+	payload := make([]byte, 4+len(packet))
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(packet)))
+	payload[3] = c.sequence
+	copy(payload[4:], packet)
+	_, err := c.conn.Write(payload)
 	return err
 }
 
@@ -1559,7 +1409,7 @@ func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
 	}
 
 	// Build a synthetic query that returns the status as a result set
-	query := fmt.Sprintf("SELECT 'Shard' AS `Variable_name`, '%s' AS `Value` UNION ALL SELECT 'Backend', '%s'", shard, backend)
+	query := fmt.Sprintf("SELECT 'Backend' AS `Variable_name`, '%s' AS `Value` UNION ALL SELECT 'Shard', '%s' UNION ALL SELECT 'Cache_Hit', '%v'", backend, shard, c.lastQueryCacheHit)
 	response, err := c.execBackendQuery(query)
 	if err != nil {
 		return err

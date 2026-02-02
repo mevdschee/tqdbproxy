@@ -2,6 +2,8 @@ package mariadb
 
 import (
 	"encoding/binary"
+	"fmt"
+	"io"
 	"net"
 	"testing"
 
@@ -9,12 +11,16 @@ import (
 	"github.com/mevdschee/tqdbproxy/replica"
 )
 
+// DEFAULT_CAPABILITY is used for testing
+const DEFAULT_CAPABILITY uint32 = 0x018206FF
+
 // mockBackend simulates a MariaDB server at a basic level
-func mockBackend(t *testing.T, addr string) (net.Listener, chan bool) {
+func mockBackend(t *testing.T, addr string) (net.Listener, string, chan bool) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to listen on %s: %v", addr, err)
 	}
+	actualAddr := l.Addr().String()
 	stop := make(chan bool)
 	go func() {
 		for {
@@ -30,32 +36,53 @@ func mockBackend(t *testing.T, addr string) (net.Listener, chan bool) {
 			go handleMockConn(conn)
 		}
 	}()
-	return l, stop
+	return l, actualAddr, stop
 }
 
 func handleMockConn(conn net.Conn) {
 	defer conn.Close()
 	// 1. Send Handshake Greeting
-	// [len 3] [seq 1] [protocol 1] [version...] [conn_id 4] [salt 8] [null 1] [cap_low 2] [charset 1] [status 2] [cap_high 2] [auth_plugin_len 1] [reserved 10] [salt2 12] [null 1]
-	greeting := make([]byte, 80)
-	binary.LittleEndian.PutUint32(greeting[0:4], uint32(len(greeting)-4))
-	greeting[3] = 0  // seq
-	greeting[4] = 10 // protocol version
-	copy(greeting[5:], "10.5.mock")
-	// salt
-	copy(greeting[32:40], "12345678")
-	conn.Write(greeting)
+	version := "10.5.mock-MariaDB"
+	data := make([]byte, 0, 128)
+	data = append(data, 10) // Protocol
+	data = append(data, []byte(version)...)
+	data = append(data, 0)
+	data = append(data, 1, 0, 0, 0)    // Conn ID
+	data = append(data, "12345678"...) // Salt 1
+	data = append(data, 0)             // Filler
+	data = append(data, 0x00, 0xf7)    // Cap low (including Protocol 41 and Secure Connection)
+	data = append(data, 33)            // Charset
+	data = append(data, 0, 0)          // Status
+	data = append(data, 0x00, 0x00)    // Cap high
+	data = append(data, 21)            // Auth plugin data len
+	data = append(data, make([]byte, 10)...)
+	data = append(data, "123456789012"...) // Salt 2
+	data = append(data, 0)                 // Terminator
+
+	packet := make([]byte, 4+len(data))
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(data)))
+	packet[3] = 0
+	copy(packet[4:], data)
+	conn.Write(packet)
 
 	// 2. Read Auth Response
 	header := make([]byte, 4)
-	net.Conn(conn).Read(header)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		fmt.Printf("Mock received error reading auth header: %v\n", err)
+		return
+	}
 	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
 	payload := make([]byte, length)
-	conn.Read(payload)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		fmt.Printf("Mock received error reading auth payload: %v\n", err)
+		return
+	}
+	fmt.Printf("Mock received auth packet, len=%d\n", length)
 
 	// 3. Send OK
 	ok := []byte{0x07, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}
 	conn.Write(ok)
+	fmt.Printf("Mock sent OK packet\n")
 
 	// 4. Handle commands
 	for {
@@ -65,7 +92,7 @@ func handleMockConn(conn net.Conn) {
 		}
 		length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
 		payload := make([]byte, length)
-		if _, err := conn.Read(payload); err != nil {
+		if _, err := io.ReadFull(conn, payload); err != nil {
 			return
 		}
 
@@ -76,9 +103,9 @@ func handleMockConn(conn net.Conn) {
 
 func TestShardSwitching(t *testing.T) {
 	// Setup two mock backends
-	l1, stop1 := mockBackend(t, "127.0.0.1:3311")
+	l1, addr1, stop1 := mockBackend(t, "127.0.0.1:0")
 	defer func() { stop1 <- true }()
-	l2, stop2 := mockBackend(t, "127.0.0.1:3322")
+	l2, addr2, stop2 := mockBackend(t, "127.0.0.1:0")
 	defer func() { stop2 <- true }()
 
 	// Setup Proxy with sharding config
@@ -89,18 +116,50 @@ func TestShardSwitching(t *testing.T) {
 		},
 	}
 	pools := map[string]*replica.Pool{
-		"main":   replica.NewPool("127.0.0.1:3311", nil),
-		"shard1": replica.NewPool("127.0.0.1:3322", nil),
+		"main":   replica.NewPool(addr1, nil),
+		"shard1": replica.NewPool(addr2, nil),
 	}
 	proxy := New(pcfg, pools, nil)
 
 	// Create a mock clientConn
-	conn1, _ := net.Dial("tcp", "127.0.0.1:3311")
+	conn1, _ := net.Dial("tcp", addr1)
+	clientRemote, clientLocal := net.Pipe()
+	defer clientRemote.Close()
+	defer clientLocal.Close()
+
+	// Background client to respond to auth switch
+	go func() {
+		for {
+			header := make([]byte, 4)
+			if _, err := io.ReadFull(clientRemote, header); err != nil {
+				return
+			}
+			length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+			payload := make([]byte, length)
+			if _, err := io.ReadFull(clientRemote, payload); err != nil {
+				return
+			}
+			if len(payload) > 0 && payload[0] == 0xFE {
+				// Respond to Auth Switch with dummy data
+				resp := []byte{0x00, 0x00, 0x00, 0x00}
+				packet := make([]byte, 4+len(resp))
+				binary.LittleEndian.PutUint32(packet[0:4], uint32(len(resp)))
+				packet[3] = header[3] + 1
+				copy(packet[4:], resp)
+				clientRemote.Write(packet)
+			}
+		}
+	}()
+
 	c := &clientConn{
+		conn:        clientLocal,
 		backend:     conn1,
 		backendPool: pools["main"],
+		backendAddr: addr1,
 		proxy:       proxy,
 		connID:      1,
+		user:        "tqdbproxy",
+		db:          "testdb",
 		rawAuthPkt:  []byte{0x00, 0x00, 0x00, 0x00}, // dummy auth
 	}
 
@@ -124,10 +183,88 @@ func TestShardSwitching(t *testing.T) {
 
 	// Verify we are actually connected to the new port
 	remoteAddr := c.backend.RemoteAddr().String()
-	if remoteAddr != "127.0.0.1:3322" {
-		t.Errorf("Backend port mismatch: got %v, want 127.0.0.1:3322", remoteAddr)
+	if remoteAddr != addr2 {
+		t.Errorf("Backend port mismatch: got %v, want %s", remoteAddr, addr2)
 	}
 
 	l1.Close()
 	l2.Close()
+}
+
+func TestInitialHandshake(t *testing.T) {
+	// Setup mock backend
+	l, addr, stop := mockBackend(t, "127.0.0.1:0")
+	defer func() { stop <- true }() // Runs second (LIFO)
+	defer l.Close()                 // Runs first - unblocks Accept()
+
+	pcfg := config.ProxyConfig{Default: "main"}
+	pools := map[string]*replica.Pool{
+		"main": replica.NewPool(addr, nil),
+	}
+	proxy := New(pcfg, pools, nil)
+
+	// Mock client connection
+	clientRemote, clientLocal := net.Pipe()
+	defer clientRemote.Close()
+	defer clientLocal.Close()
+
+	// Background client to handle the handshake
+	go func() {
+		// 1. Read Greeting from Proxy
+		header := make([]byte, 4)
+		if _, err := io.ReadFull(clientRemote, header); err != nil {
+			return
+		}
+		length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+		payload := make([]byte, length)
+		if _, err := io.ReadFull(clientRemote, payload); err != nil {
+			return
+		}
+
+		// 2. Send Auth Response
+		user := "tqdbproxy"
+		authResp := []byte{0x01, 0x02, 0x03, 0x04} // Dummy scramble
+
+		// Handshake Response Packet: [cap 4] [max_packet 4] [charset 1] [reserved 23] [user\0] [auth_len 1] [auth]
+		resp := make([]byte, 4+4+1+23)
+		binary.LittleEndian.PutUint32(resp[0:4], DEFAULT_CAPABILITY)
+		resp[8] = 33 // charset
+		resp = append(resp, []byte(user)...)
+		resp = append(resp, 0)
+		resp = append(resp, byte(len(authResp)))
+		resp = append(resp, authResp...)
+
+		packet := make([]byte, 4+len(resp))
+		binary.LittleEndian.PutUint32(packet[0:4], uint32(len(resp)))
+		packet[3] = 1 // seq
+		copy(packet[4:], resp)
+		clientRemote.Write(packet)
+
+		// 3. Read OK from Proxy
+		if _, err := io.ReadFull(clientRemote, header); err != nil {
+			return
+		}
+		length = int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+		payload = make([]byte, length)
+		io.ReadFull(clientRemote, payload)
+	}()
+
+	// Simulate Proxy's handleConnection logic
+	conn := &clientConn{
+		conn:        clientLocal,
+		backendPool: pools["main"],
+		proxy:       proxy,
+		connID:      1,
+		sequence:    0,
+	}
+
+	backend, err := conn.dialAndAuth(addr)
+	if err != nil {
+		t.Fatalf("Initial dialAndAuth failed: %v", err)
+	}
+	defer backend.Close()
+
+	if conn.user != "tqdbproxy" {
+		t.Errorf("Expected user tqdbproxy, got %s", conn.user)
+	}
 }

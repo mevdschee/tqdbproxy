@@ -2,7 +2,10 @@ package mariadb
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -40,8 +43,8 @@ func TestPreparedStatements_Caching(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Try using a single statement object to force reuse of stmt ID
-	stmt, err := db.Prepare("/* ttl:10 */ SELECT ?")
+	// 1. Prepare (using a unique comment to avoid collisions with previous runs)
+	stmt, err := db.Prepare(fmt.Sprintf("/* ttl:10 */ SELECT ? -- %d", time.Now().UnixNano()))
 	if err != nil {
 		t.Fatalf("Prepare failed: %v", err)
 	}
@@ -92,7 +95,7 @@ func isCacheHit(t *testing.T, db *sql.DB) bool {
 		if err := rows.Scan(&varName, &value); err != nil {
 			t.Fatal(err)
 		}
-		if varName == "Backend" && value == "cache" {
+		if varName == "Backend" && strings.HasPrefix(value, "cache") {
 			return true
 		}
 	}

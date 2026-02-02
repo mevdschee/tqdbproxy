@@ -25,3 +25,5 @@ require (
 	golang.org/x/sys v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
+
+replace github.com/go-sql-driver/mysql => ./third_party/mysql-driver
