@@ -26,11 +26,10 @@ mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 | Shard         | main    |
 | Backend       | primary |
-| Cache_hit     | 0       |
 +---------------+---------+
 ```
 
-Values: `Backend` = `primary`, `replicaN`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
+Values: `Backend` = `primary`, `replicaN`, `cache`, `cache (stale)` or `none`;
 
 ## Unix Socket Support
 

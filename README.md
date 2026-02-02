@@ -69,7 +69,6 @@ mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 | Shard         | main    |
 | Backend       | primary |
-| Cache_hit     | 0       |
 +---------------+---------+
 ```
 
@@ -80,11 +79,10 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 ---------------+---------
  Shard         | main
  Backend       | primary
- Cache_hit     | 0
-(3 rows)
+(2 rows)
 ```
 
-Values: `Backend` = `primary`, `replicaN`, `cache`, or `none` (no query yet); `Cache_hit` = `0` or `1`.
+Values: `Backend` = `primary`, `replicaN`, `cache`, `cache (stale)` or `none` (no query yet).
 
 This is useful for debugging cache behavior during development.
 

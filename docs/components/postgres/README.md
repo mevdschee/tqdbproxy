@@ -24,11 +24,10 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 ---------------+---------
  Shard         | main
  Backend       | primary
- Cache_hit     | 0
 (3 rows)
 ```
 
-Values: `Backend` = `primary`, `replicaN`, `cache`, or `none`; `Cache_hit` = `0` or `1`.
+Values: `Backend` = `primary`, `replicaN`, `cache`, `cache (stale)` or `none`;
 
 ## Unix Socket Support
 
