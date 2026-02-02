@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -34,6 +35,8 @@ const (
 	comStmtExecute = 0x17
 	comStmtClose   = 0x19
 	comStmtReset   = 0x1a
+
+	backendTimeout = 30 * time.Second
 )
 
 // Proxy implements a MariaDB server that forwards to backend
@@ -42,7 +45,7 @@ type Proxy struct {
 	pools  map[string]*replica.Pool
 	cache  *cache.Cache
 	db     *sql.DB
-	connID uint32
+	connID uint32 // Managed atomically
 	mu     sync.RWMutex
 }
 
@@ -122,8 +125,8 @@ func (p *Proxy) acceptLoop(listener net.Listener) {
 			log.Printf("[MariaDB] Accept error: %v", err)
 			continue
 		}
-		p.connID++
-		go p.handleConnection(client, p.connID)
+		connID := atomic.AddUint32(&p.connID, 1)
+		go p.handleConnection(client, connID)
 	}
 }
 
@@ -232,6 +235,11 @@ func (c *clientConn) handshake() error {
 
 	// Skip filler (1 byte)
 	pos++
+
+	// Step 1b: Strip CLIENT_SSL from backend greeting lower capabilities (bit 11)
+	// We do this so the client doesn't try to negotiate TLS with the proxy.
+	backendGreeting[pos] &= ^byte(0)      // bits 0-7
+	backendGreeting[pos+1] &= ^byte(0x08) // bits 8-15 (0x0800 is bit 11)
 
 	// Skip capability flags lower (2 bytes), charset (1), status (2), cap upper (2)
 	pos += 7
@@ -395,6 +403,7 @@ func (c *clientConn) readClientAuth() error {
 
 	// Capability flags
 	c.capability = binary.LittleEndian.Uint32(packet[pos : pos+4])
+	log.Printf("[MariaDB] Client %d capabilities: 0x%08x", c.connID, c.capability)
 	pos += 4
 
 	// Max packet size
@@ -404,23 +413,43 @@ func (c *clientConn) readClientAuth() error {
 	pos++
 
 	// Reserved (23 bytes)
+	if pos+23 > len(packet) {
+		return fmt.Errorf("malformed packet: too short for reserved field")
+	}
 	pos += 23
 
 	// Username (null-terminated)
-	user := string(packet[pos : pos+bytes.IndexByte(packet[pos:], 0)])
-	pos += len(user) + 1
+	if pos >= len(packet) {
+		return fmt.Errorf("malformed packet: too short for username")
+	}
+	nullIdx := bytes.IndexByte(packet[pos:], 0)
+	if nullIdx == -1 {
+		return fmt.Errorf("malformed packet: missing null terminator for username")
+	}
+	user := string(packet[pos : pos+nullIdx])
+	pos += nullIdx + 1
 
 	// Auth response length
+	if pos >= len(packet) {
+		return fmt.Errorf("malformed packet: too short for auth length")
+	}
 	authLen := int(packet[pos])
 	pos++
 
 	// Auth response
+	if pos+authLen > len(packet) {
+		return fmt.Errorf("malformed packet: auth response exceeds packet size")
+	}
 	auth := packet[pos : pos+authLen]
 	pos += authLen
 
 	// Database name (if CLIENT_CONNECT_WITH_DB)
 	if c.capability&CLIENT_CONNECT_WITH_DB > 0 && pos < len(packet) {
-		c.db = string(packet[pos : pos+bytes.IndexByte(packet[pos:], 0)])
+		idx := bytes.IndexByte(packet[pos:], 0)
+		if idx != -1 {
+			c.db = string(packet[pos : pos+idx])
+			log.Printf("[MariaDB] Client %d selecting DB: %q", c.connID, c.db)
+		}
 	}
 
 	// Store username and auth for backend connection
@@ -490,7 +519,58 @@ func (c *clientConn) ensureBackendConn(addr string, name string, pool *replica.P
 
 	log.Printf("[MariaDB] Switching backend for conn %d: %s -> %s (%s)", c.connID, c.backendAddr, addr, name)
 
-	// Reconnect and re-authenticate
+	newBackend, err := c.dialAndAuth(addr)
+	if err != nil {
+		return err
+	}
+
+	// Switch successful
+	if c.backend != nil {
+		c.backend.Close()
+	}
+	c.backend = newBackend
+	c.backendPool = pool
+	c.backendAddr = addr
+	c.backendName = name
+
+	return nil
+}
+
+func (c *clientConn) handleLocalInfile(initialResponse []byte, moreResults bool) error {
+	// 1. Forward 0xFB response to client
+	if err := c.forwardBackendResponse(initialResponse, moreResults); err != nil {
+		return err
+	}
+
+	// 2. Read packets from client and forward to backend
+	for {
+		packet, err := c.readPacket() // Read from client
+		if err != nil {
+			return err
+		}
+
+		// Forward to backend
+		if err := c.writeBackendPacket(packet); err != nil {
+			return err
+		}
+
+		// Empty packet means EOF from client
+		if len(packet) == 0 {
+			break
+		}
+	}
+
+	// 3. Read final OK/ERR from backend
+	finalResponse, err := c.execBackendResponse()
+	if err != nil {
+		return err
+	}
+
+	return c.forwardBackendResponse(finalResponse, moreResults)
+}
+
+func (c *clientConn) dialAndAuth(addr string) (net.Conn, error) {
+	// Re-authenticate
 	network := "tcp"
 	dialAddr := addr
 	if len(addr) > 5 && addr[:5] == "unix:" {
@@ -498,61 +578,58 @@ func (c *clientConn) ensureBackendConn(addr string, name string, pool *replica.P
 		dialAddr = addr[5:]
 	}
 
-	newBackend, err := net.Dial(network, dialAddr)
+	newBackend, err := net.DialTimeout(network, dialAddr, backendTimeout)
 	if err != nil {
-		return fmt.Errorf("failed to connect to new backend: %v", err)
+		return nil, fmt.Errorf("failed to connect to backend: %v", err)
 	}
 
-	// Read greeting from new backend
+	// Read greeting from backend
 	header := make([]byte, 4)
+	newBackend.SetReadDeadline(time.Now().Add(backendTimeout))
 	if _, err := io.ReadFull(newBackend, header); err != nil {
 		newBackend.Close()
-		return fmt.Errorf("failed to read from new backend: %v", err)
+		return nil, fmt.Errorf("failed to read greeting from backend: %v", err)
 	}
 	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(newBackend, payload); err != nil {
 		newBackend.Close()
-		return err
+		return nil, err
 	}
 
-	// Forward original auth to new backend
-	c.backendSeq = header[3] + 1
+	// Forward original auth to backend
+	seq := header[3] + 1
 	packet := make([]byte, 4+len(c.rawAuthPkt))
 	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(c.rawAuthPkt)))
-	packet[3] = c.backendSeq
+	packet[3] = seq
 	copy(packet[4:], c.rawAuthPkt)
+	newBackend.SetWriteDeadline(time.Now().Add(backendTimeout))
 	if _, err := newBackend.Write(packet); err != nil {
 		newBackend.Close()
-		return err
+		return nil, err
 	}
 
 	// Read auth response
+	newBackend.SetReadDeadline(time.Now().Add(backendTimeout))
 	if _, err := io.ReadFull(newBackend, header); err != nil {
 		newBackend.Close()
-		return err
+		return nil, err
 	}
 	length = int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
 	payload = make([]byte, length)
 	if _, err := io.ReadFull(newBackend, payload); err != nil {
 		newBackend.Close()
-		return err
+		return nil, err
 	}
 
 	if len(payload) > 0 && payload[0] == 0xFF {
 		newBackend.Close()
-		return fmt.Errorf("backend switch auth failed (likely salt mismatch)")
+		return nil, fmt.Errorf("backend auth failed")
 	}
 
-	// Switch successful
-	c.backend.Close()
-	c.backend = newBackend
-	c.backendPool = pool
-	c.backendAddr = addr
-	c.backendName = name
-	c.backendSeq = header[3]
-
-	return nil
+	// Reset deadlines
+	newBackend.SetDeadline(time.Time{})
+	return newBackend, nil
 }
 
 func (c *clientConn) dispatch(cmd byte, data []byte) error {
@@ -754,7 +831,6 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 		return err
 	}
 
-	// Execute query on backend via raw socket
 	response, err := c.execBackendQuery(parsed.Query)
 	if err != nil {
 		// Cancel inflight if we were the first request
@@ -762,6 +838,11 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 			c.proxy.cache.CancelInflight(parsed.Query)
 		}
 		return err
+	}
+
+	// Check for LOAD DATA LOCAL INFILE response (0xFB)
+	if len(response) >= 5 && response[4] == 0xFB {
+		return c.handleLocalInfile(response, moreResults)
 	}
 
 	metrics.DatabaseQueries.WithLabelValues(backendName).Inc()
@@ -863,20 +944,90 @@ func (c *clientConn) handlePrepare(query string) error {
 	return c.forwardBackendResponse(fullResponse, false)
 }
 
-// refreshQueryInBackground refreshes a stale cache entry.
-// Called when cache.FlagRefresh is returned (first stale access).
+// refreshQueryInBackground refreshes a stale cache entry using an independent connection.
 func (c *clientConn) refreshQueryInBackground(query string, ttl int) {
+	// Don't hold c.mu while dialing or querying
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	backendAddr := c.backendAddr
+	c.mu.Unlock()
 
-	parsed := parser.Parse(query)
-	response, err := c.execBackendQuery(parsed.Query)
+	conn, err := c.dialAndAuth(backendAddr)
 	if err != nil {
-		log.Printf("[MariaDB] Background refresh failed for query: %v", err)
+		log.Printf("[MariaDB] Background refresh failed (dial): %v", err)
 		return
 	}
-	// Update cache with fresh data - use the passed TTL
-	c.proxy.cache.Set(parsed.Query, response, time.Duration(ttl)*time.Second)
+	defer conn.Close()
+
+	response, err := c.execQueryOnConn(conn, query)
+	if err != nil {
+		log.Printf("[MariaDB] Background refresh failed (query): %v", err)
+		return
+	}
+
+	// Update cache with fresh data
+	c.proxy.cache.Set(query, response, time.Duration(ttl)*time.Second)
+}
+
+func (c *clientConn) execQueryOnConn(conn net.Conn, query string) ([]byte, error) {
+	// Build COM_QUERY packet
+	payload := make([]byte, 1+len(query))
+	payload[0] = comQuery
+	copy(payload[1:], query)
+
+	// Send packet
+	seq := byte(0)
+	packet := make([]byte, 4+len(payload))
+	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(payload)))
+	packet[3] = seq
+	copy(packet[4:], payload)
+	conn.SetWriteDeadline(time.Now().Add(backendTimeout))
+	if _, err := conn.Write(packet); err != nil {
+		return nil, err
+	}
+	conn.SetWriteDeadline(time.Time{})
+
+	// Read response using a temporary sequence tracker
+	var response []byte
+	eofCount := 0
+	for {
+		header := make([]byte, 4)
+		conn.SetReadDeadline(time.Now().Add(backendTimeout))
+		if _, err := io.ReadFull(conn, header); err != nil {
+			return nil, err
+		}
+		length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+
+		packetPayload := make([]byte, length)
+		if _, err := io.ReadFull(conn, packetPayload); err != nil {
+			return nil, err
+		}
+		conn.SetReadDeadline(time.Time{})
+
+		// Build result
+		response = append(response, header...)
+		response = append(response, packetPayload...)
+
+		if len(packetPayload) > 0 {
+			switch packetPayload[0] {
+			case 0x00, 0xFE, 0xFF:
+				// Simplified end detection for background refresh (usually SELECTs)
+				if packetPayload[0] == 0xFF {
+					return response, nil
+				}
+				if packetPayload[0] == 0x00 || (packetPayload[0] == 0xFE && len(packetPayload) < 9) {
+					// Check for more results or EOF count
+					if packetPayload[0] == 0xFE {
+						eofCount++
+						if eofCount >= 2 {
+							return response, nil
+						}
+					} else {
+						return response, nil
+					}
+				}
+			}
+		}
+	}
 }
 
 func (c *clientConn) handleExecute(data []byte) error {
@@ -926,7 +1077,14 @@ func (c *clientConn) handleExecute(data []byte) error {
 		return err
 	}
 
-	if cacheKey != "" {
+	// Check for LOAD DATA LOCAL INFILE response (0xFB)
+	if len(response) >= 5 && response[4] == 0xFB {
+		return c.handleLocalInfile(response, false)
+	}
+
+	// Don't cache error responses
+	isError := len(response) >= 5 && response[4] == 0xFF
+	if cacheKey != "" && !isError {
 		c.proxy.cache.Set(cacheKey, response, time.Duration(parsed.TTL)*time.Second)
 	}
 
@@ -970,11 +1128,13 @@ func (c *clientConn) execBackendResponse() ([]byte, error) {
 	// This is similar to execBackendQuery but without sending the command
 	var response []byte
 	eofCount := 0
+	packetCount := 0
 	for {
 		packet, err := c.readBackendPacket()
 		if err != nil {
 			return nil, err
 		}
+		packetCount++
 
 		header := make([]byte, 4)
 		binary.LittleEndian.PutUint32(header[0:4], uint32(len(packet)))
@@ -1008,6 +1168,11 @@ func (c *clientConn) execBackendResponse() ([]byte, error) {
 				return response, nil
 			case 0xFF: // Error
 				return response, nil
+			case 0xFB: // Local Infile Request
+				if packetCount == 1 {
+					return response, nil // Immediately return on 0xFB as first packet
+				}
+				// Otherwise it's a NULL value in a Row Data packet, continue reading
 			case 0xFE: // EOF
 				if len(packet) < 9 {
 					eofCount++
@@ -1142,7 +1307,9 @@ func (c *clientConn) readPacket() ([]byte, error) {
 
 func (c *clientConn) readBackendPacket() ([]byte, error) {
 	header := make([]byte, 4)
+	c.backend.SetReadDeadline(time.Now().Add(backendTimeout))
 	if _, err := io.ReadFull(c.backend, header); err != nil {
+		c.backend.SetReadDeadline(time.Time{})
 		return nil, err
 	}
 
@@ -1151,9 +1318,11 @@ func (c *clientConn) readBackendPacket() ([]byte, error) {
 
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(c.backend, payload); err != nil {
+		c.backend.SetReadDeadline(time.Time{})
 		return nil, err
 	}
 
+	c.backend.SetReadDeadline(time.Time{})
 	return payload, nil
 }
 
@@ -1163,7 +1332,9 @@ func (c *clientConn) writeBackendPacket(payload []byte) error {
 	binary.LittleEndian.PutUint32(packet[0:4], uint32(len(payload)))
 	packet[3] = c.backendSeq
 	copy(packet[4:], payload)
+	c.backend.SetWriteDeadline(time.Now().Add(backendTimeout))
 	_, err := c.backend.Write(packet)
+	c.backend.SetWriteDeadline(time.Time{})
 	return err
 }
 

@@ -83,14 +83,18 @@ func (c *Cache) GetOrWait(key string) ([]byte, int, bool, bool) {
 	// Check if another goroutine is already fetching this key
 	f := &flight{done: make(chan struct{})}
 	if existing, loaded := c.inflight.LoadOrStore(key, f); loaded {
-		// Wait for the other goroutine to finish
+		// Wait for the other goroutine to finish with a safety timeout
 		existingFlight := existing.(*flight)
-		<-existingFlight.done
-		// Now try to get from cache
-		if value, flags, ok := c.Get(key); ok {
-			return value, flags, true, true
+		select {
+		case <-existingFlight.done:
+			// Success, try to get from cache
+			if value, flags, ok := c.Get(key); ok {
+				return value, flags, true, true
+			}
+		case <-time.After(15 * time.Second):
+			// Safety timeout to prevent permanent hangs
 		}
-		return nil, 0, false, true // Other request failed or TTL=0
+		return nil, 0, false, true // Other request failed, timed out, or TTL=0
 	}
 
 	// We are the first - return immediately, caller will fetch and call SetAndNotify
