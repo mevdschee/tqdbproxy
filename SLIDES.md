@@ -52,11 +52,11 @@ SELECT * FROM `users` WHERE `active` = 1
 
 ### Cache Expiry
 
-- Fresh: Age between 0 and TTL (serve cache)
-- Soft: Age between TTL and 2 x TTL (refresh cache)
-- Hard: Age above 2 x TTL (evict cache)
+- Fresh: Age between 0 and TTL = serve cache
+- Soft: Age between TTL and 2 x TTL = refresh cache
+- Hard: Age above 2 x TTL = evict cache
 
-NB: Ensure: TTL > refresh duration
+NB: Ensure: TTL > refresh duration!
 
 ---
 
