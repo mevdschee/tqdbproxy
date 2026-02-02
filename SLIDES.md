@@ -81,7 +81,7 @@ NB: Ensure: TTL > refresh duration!
 
 ---
 
-## Query Status Inspection
+## Query Status
 
 mariadb> SHOW TQDB STATUS;       => SELECT * FROM pg_tqdb_status;
 +---------------+---------+       variable_name |  value  
@@ -155,12 +155,22 @@ databases = logs
 
 ---
 
-## Dynamic Shard Switching
+## MariaDB Authentication
 
-- **MariaDB**: Switches backends mid-connection when you issue `USE database` or FQN query.
-- **PostgreSQL**: Routes to the correct shard at connection-time based on the startup message.
-- **Unified Model**: Sharding is done at the **Database level** (not schemas).
-- **Credentials**: User credentials must be synced across shards (Proxy forwards them as-is).
+- Most proxies use credentials in config file
+- TQDBProxy forwards credentials as-is to backend
+- MariaDB uses double SHA1 hashing with nonce (salt)
+- Patched Go MySQL driver, to forward handshake
+- See: https://github.com/mevdschee/go-sql-driver
+
+---
+
+## MariaDB Shard Switching
+
+- TQDBProxy shards at the database level (by database name).
+- Some PostgreSQL proxies support schema level sharding.
+- MariaDB may switch backends on `USE database` or FQN query.
+- PostgreSQL routes to the correct shard at connection time.
 
 ---
 
