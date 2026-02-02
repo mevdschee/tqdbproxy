@@ -19,7 +19,7 @@
 ┌────────────────────────┐    ┌────────────────────────┐
 │  Application Server 1  │    │  Application Server 2  │
 │ ┌────────┐ ┌─────────┐ │    │ ┌────────┐ ┌─────────┐ │
-│ │TQMemory◀─▶TQDBProxy│ │    │ │TQMemory◀─▶TQDBProxy│ │
+│ │TQMemory|+|TQDBProxy| │    │ │TQMemory|+|TQDBProxy│ │
 │ └────────┘ └────┬────┘ │    │ └────────┘ └────┬────┘ │
 └─────────────────┼──────┘    └─────────────────┼──────┘
                   │                             │
@@ -78,19 +78,13 @@ SELECT * FROM `users` WHERE `active` = 1
 
 ## Query Status Inspection
 
-**MariaDB:**
-```sql
-SHOW TQDB STATUS;
-```
+Custom commands
+- **MariaDB**: SHOW TQDB STATUS;
+- **PostgreSQL**: SELECT * FROM pg_tqdb_status;
 
-**PostgreSQL:**
-```sql
-SELECT * FROM pg_tqdb_status;
-```
-
-Inspect your last query results:
-- `Shard`: (main / shard1 / ...)
-- `Backend`: (primary / replicas[n] / cache)
+Show your last query results
+- **Shard**: main / shard1 / ...
+- **Backend**: primary / replicas[n] / cache
 
 ---
 
