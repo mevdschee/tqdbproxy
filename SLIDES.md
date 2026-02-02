@@ -53,8 +53,8 @@ SELECT * FROM `users` WHERE `active` = 1
 ### Cache Expiry
 
 - Fresh: Age between 0 and TTL = serve cache
-- Soft: Age between TTL and 2 x TTL = refresh cache
-- Hard: Age above 2 x TTL = evict cache
+- Stale: Age between TTL and 2 x TTL = refresh cache
+- Miss: Age above 2 x TTL = cache evicted
 
 NB: Ensure: TTL > refresh duration!
 
@@ -62,7 +62,7 @@ NB: Ensure: TTL > refresh duration!
 
 ## Thundering Herd Protection / Single Flight
 
-**Cold Cache**: The first request that gets a cache miss fetches the result from the database. Subsequent requests block and wait for the result.
+**Cold Cache**: The first request that gets a cache miss fetches the result from the database. Subsequent requests have to wait for the result.
 
 **Warm Cache**: The first request that detects soft expiration fetches a new result from the database. Subsequent requests are served stale data.
 
@@ -73,19 +73,11 @@ NB: Ensure: TTL > refresh duration!
 
 ## Caching Logic
 
-1. Check incoming query, analyze:
-  a. Write, forward to primary
-  b. Transaction, forward to primary
-  c. Hint, lookup in local cache
-    1. **Hit**, check if still fresh
-      a. Yes, return cached result
-      b. No, check if in-flight
-        1. Yes, return stale data
-        2. No, forward to replica pool
-    2. **Miss**, check if in-flight
-      a. Yes, wait for result
-      b. No, forward to replica pool
-  d. Else, forward to primary (consistent read)
+1. Fresh **hit** => serve cache
+2. Stale **hit** + in-flight => serve stale
+3. Stale **hit** + first access => refresh synchronously (single-flight)
+4. **Miss** + in-flight => wait for result
+5. **Miss** + first access => query backend (single-flight)
 
 ---
 
