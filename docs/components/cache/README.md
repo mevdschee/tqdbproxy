@@ -15,7 +15,7 @@ The `cache` component provides an in-memory caching layer with **thundering herd
 - `Get(key string) ([]byte, int, bool)`: Returns (value, flags, ok). Flags indicate freshness.
 - `GetOrWait(key string)`: For cold cache single-flight - waits if another goroutine is fetching.
 - `SetAndNotify(key, value, ttl)`: Stores result and notifies waiting goroutines.
-- `Set(key, value, ttl)`: Simple store for background refresh.
+- `Set(key, value, ttl)`: Stores a fresh result in the cache.
 - `Delete(key string)`: Removes an entry.
 
 ## Staleness Flags

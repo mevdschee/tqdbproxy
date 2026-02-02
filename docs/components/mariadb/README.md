@@ -9,7 +9,7 @@ The `mariadb` component implements the MariaDB wire protocol, allowing TQDBProxy
 - **Caching Integration**:
   - Checks the cache for `SELECT` queries with a TTL hint.
   - Automatically caches results returned from the backend if the query is cacheable.
-  - **Thundering Herd Protection**: Serves stale data while refreshing in background.
+  - **Thundering Herd Protection**: Serves stale data to concurrent requests while one request refreshes the cache.
   - **Cold Cache Single-Flight**: Prevents concurrent DB queries for the same uncached key.
 - **Prepared Statements**: Tracks statement IDs and handles caching for executed prepared statements by combining the query template and parameters into a cache key.
 - **Database Sharding**: Supports transparent mid-connection shard switching via `USE` statements or `COM_INIT_DB` packets, with automatic re-authentication.

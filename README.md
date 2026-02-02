@@ -110,7 +110,7 @@ PostgreSQL routing is based on the **database name** provided during connection 
 
 ## Thundering Herd Protection
 
-The proxy implements single-flight for warmup and resfresh to prevent concurrent DB queries for the same key.
+The proxy implements single-flight for cold cache misses and stale cache refreshes to prevent backend saturation.
 
 ## Metrics
 
