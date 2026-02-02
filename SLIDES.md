@@ -2,12 +2,14 @@
 
 ---
 
-**High-performance MariaDB and PostgreSQL proxy**
+## What is TQDBProxy?
 
-- **Caching**: Unified query caching with TQMemory
-- **Observability**: Metrics with source file and line info
-- **Scalability**: Read replica support and **Database Sharding**
-- **Reliability**: Single-flight thundering herd protection
+- A proxy for **MariaDB** and **PostgreSQL**
+- Fast in-memory **query result caching**
+- Provides **single-flight** for cold and warm cache
+- Routes cacheable queries to **read replicas**
+- Metrics with query **source file + line number**
+- Database **sharding** based on database name
 
 ---
 
@@ -29,37 +31,7 @@
 │ (Writes/Reads)  │           │ (Cachable Reads) │ │
 └─────────────────┘           └─┬────────────────┘ │
                                 └──────────────────┘
-
  ```
-
----
-
-## Sharding & Replicas
-
-Configure backends and database mappings in `config.ini`:
-
-```ini
-[mariadb]
-listen = :3307
-default = main
-
-[mariadb.main]
-primary = 127.0.0.1:3306
-replicas = 127.0.0.1:3307, 127.0.0.1:3308
-
-[mariadb.shard1]
-primary = 10.0.0.1:3309
-databases = logs
-```
-
----
-
-## Dynamic Shard Switching
-
-- **MariaDB**: Transparently switches backends mid-connection when you issue `USE database` or a `COM_INIT_DB` packet.
-- **PostgreSQL**: Routes to the correct shard at connection-time based on the startup message.
-- **Unified Model**: Sharding is done at the **Database level** (not schemas).
-- **Credentials**: User credentials must be synced across shards (Proxy forwards them as-is).
 
 ---
 
@@ -69,7 +41,7 @@ Add metadata comments to your SQL queries:
 
 ```sql
 /* ttl:60 file:app.php line:42 */ 
-SELECT * FROM users WHERE active = 1
+SELECT * FROM `users` WHERE `active` = 1
 ```
 
 - `ttl`: Cache duration in seconds
@@ -89,18 +61,18 @@ SELECT * FROM users WHERE active = 1
 
 ---
 
-## Transaction Support
+## Query Flow
 
-Full ACID transaction support for both protocols:
-
-```sql
-BEGIN;
-UPDATE accounts SET balance = balance - 100 WHERE id = 1;
-UPDATE accounts SET balance = balance + 100 WHERE id = 2;
-COMMIT;
-```
-
-Transactions automatically bypass the cache and pin the session to the **primary** backend.
+1. Check incoming query
+  a. On write, query primary
+  b. On transaction, query primary
+  c. On hint, lookup in local cache
+    1. On hit, return cached result
+      a. On stale data, refresh in background
+    2. On miss, check in-flight
+      a. Yes, wait for result
+      b. No, query replica pool
+  d. Query primary (consistent read)
 
 ---
 
@@ -135,15 +107,6 @@ Labels are enriched with the `file` and `line` metadata hints.
 
 ---
 
-## Performance
-
-- **Zero-latency** cache hits (as fast as local query)
-- **Minimal overhead** for proxied queries (>1ms)
-- **High concurrency**: Handle thousands of client connections with small backend pools
-- **Hot Reload**: Send `SIGHUP` to refresh backend addresses without restart
-
----
-
 ## Quick Start
 
 ```bash
@@ -168,6 +131,37 @@ mysql -u tqdbproxy tqdbproxy -ptqdbproxy -P 3307 --comments
 ```sql
 /* ttl:2 */ select sleep(1); show tqdb status;
 ```
+
+---
+
+## Sharding & Replicas
+
+Configure backends and database mappings in `config.ini`:
+
+```ini
+[mariadb]
+listen = :3307
+default = main
+
+[mariadb.main]
+primary = 127.0.0.1:3306
+replicas = 127.0.0.1:3307, 127.0.0.1:3308
+
+[mariadb.shard1]
+primary = 10.0.0.1:3309
+databases = logs
+```
+
+---
+
+## Dynamic Shard Switching
+
+- **MariaDB**: Switches backends mid-connection when you issue `USE database` or FQN query.
+- **PostgreSQL**: Routes to the correct shard at connection-time based on the startup message.
+- **Unified Model**: Sharding is done at the **Database level** (not schemas).
+- **Credentials**: User credentials must be synced across shards (Proxy forwards them as-is).
+
+---
 
 **TQDBProxy** — Sharding, Caching, Reliability
 
