@@ -50,18 +50,28 @@ SELECT * FROM `users` WHERE `active` = 1
 
 ---
 
-## Thundering Herd Protection
+### Cache Expiry
 
-**Cold Cache**: Single-flight prevents concurrent DB queries for the same key while the first result is being fetched.
+- Fresh: Age between 0 and TTL (serve cache)
+- Soft: Age between TTL and 2 x TTL (refresh cache)
+- Hard: Age above 2 x TTL (evict cache)
 
-**Warm Cache**: Stale data is served to most clients while one background goroutine refreshes the value.
+NB: Ensure: TTL > refresh duration
+
+---
+
+## Thundering Herd Protection / Single Flight
+
+**Cold Cache**: The first request that gets a cache miss fetches the result from the database. Subsequent requests block and wait for the result.
+
+**Warm Cache**: The first request that detects soft expiration fetches a new result from the database. Subsequent requests are served stale data.
 
 - Prevents backend saturation during heavy traffic spikes.
 - Ensures consistent low latency for hits.
 
 ---
 
-## Query Flow
+## Caching Logic
 
 1. Check incoming query, analyze:
   a. Write, forward to primary
