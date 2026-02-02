@@ -2,10 +2,9 @@ package mariadb
 
 import (
 	"database/sql"
-	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -44,7 +43,8 @@ func TestPreparedStatements_Caching(t *testing.T) {
 	defer db.Close()
 
 	// 1. Prepare (using a unique comment to avoid collisions with previous runs)
-	stmt, err := db.Prepare(fmt.Sprintf("/* ttl:10 */ SELECT ? -- %d", time.Now().UnixNano()))
+	uniqueID := rand.Int()
+	stmt, err := db.Prepare("/* ttl:10 */ SELECT ?")
 	if err != nil {
 		t.Fatalf("Prepare failed: %v", err)
 	}
@@ -52,20 +52,20 @@ func TestPreparedStatements_Caching(t *testing.T) {
 
 	// 1. First execution (miss)
 	var val1 int
-	err = stmt.QueryRow(42).Scan(&val1)
+	err = stmt.QueryRow(uniqueID).Scan(&val1)
 	if err != nil {
 		t.Fatalf("First execute failed: %v", err)
 	}
 
 	// 2. Second execution (should be cache hit)
 	var val2 int
-	err = stmt.QueryRow(42).Scan(&val2)
+	err = stmt.QueryRow(uniqueID).Scan(&val2)
 	if err != nil {
 		t.Fatalf("Second execute failed: %v", err)
 	}
 
-	if val1 != 42 || val2 != 42 {
-		t.Errorf("Expected 42, got %d and %d", val1, val2)
+	if val1 != uniqueID || val2 != uniqueID {
+		t.Errorf("Expected %d, got %d and %d", uniqueID, val1, val2)
 	}
 
 	// Verify hit
@@ -75,12 +75,12 @@ func TestPreparedStatements_Caching(t *testing.T) {
 
 	// 3. Third execution with different param (should be cache miss)
 	var val3 int
-	err = stmt.QueryRow(43).Scan(&val3)
+	err = stmt.QueryRow(uniqueID + 1).Scan(&val3)
 	if err != nil {
 		t.Fatalf("Third execute failed: %v", err)
 	}
 	if isCacheHit(t, db) {
-		t.Errorf("Expected cache miss for different parameter (43)")
+		t.Errorf("Expected cache miss for different parameter (%d)", uniqueID+1)
 	}
 }
 
