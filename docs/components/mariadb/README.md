@@ -29,7 +29,7 @@ mariadb> SHOW TQDB STATUS;
 +---------------+---------+
 ```
 
-Values: `Backend` = `primary`, `replicaN`, `cache`, `cache (stale)` or `none`;
+Values: `Backend` = `primary`, `replicas[n]`, `cache`, `cache (stale)` or `none`;
 
 ## Unix Socket Support
 

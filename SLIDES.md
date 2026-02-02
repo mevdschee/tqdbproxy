@@ -122,7 +122,7 @@ SELECT * FROM pg_tqdb_status;
 
 Inspect your last query results:
 - `Shard`: (main / shard1 / ...)
-- `Backend`: (primary / replicas[0] / cache)
+- `Backend`: (primary / replicas[n] / cache)
 
 ---
 

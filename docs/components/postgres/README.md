@@ -27,7 +27,7 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 (3 rows)
 ```
 
-Values: `Backend` = `primary`, `replicaN`, `cache`, `cache (stale)` or `none`;
+Values: `Backend` = `primary`, `replicas[n]`, `cache`, `cache (stale)` or `none`;
 
 ## Unix Socket Support
 
