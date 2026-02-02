@@ -7,7 +7,7 @@ toolchain go1.24.12
 require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/lib/pq v1.10.9
-	github.com/mevdschee/tqmemory v0.0.0-20260124002056-03414e31cd8a
+	github.com/mevdschee/tqmemory v0.0.1
 	github.com/prometheus/client_golang v1.23.2
 	gopkg.in/ini.v1 v1.67.1
 )
