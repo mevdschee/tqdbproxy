@@ -63,16 +63,19 @@ SELECT * FROM `users` WHERE `active` = 1
 
 ## Query Flow
 
-1. Check incoming query
-  a. On write, query primary
-  b. On transaction, query primary
-  c. On hint, lookup in local cache
-    1. On hit, return cached result
-      a. On stale data, refresh in background
-    2. On miss, check in-flight
+1. Check incoming query, analyze:
+  a. Write, forward to primary
+  b. Transaction, forward to primary
+  c. Hint, lookup in local cache
+    1. **Hit**, check if TTL expired (soft)
+      a. No, return cached result
+      b. Yes, check if in-flight
+        1. Yes, return stale data
+        2. No, forward to replica pool
+    2. **Miss**, check if in-flight
       a. Yes, wait for result
-      b. No, query replica pool
-  d. Query primary (consistent read)
+      b. No, forward to replica pool
+  d. Else, forward to primary (consistent read)
 
 ---
 

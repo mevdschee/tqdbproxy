@@ -292,11 +292,11 @@ func (c *clientConn) ensureBackend(db string) error {
 
 	c.lastQueryShard = shardName
 
-	if targetPool == c.backendPool {
-		return nil // Already on the right shard
+	if targetPool == c.backendPool && c.backend != nil {
+		return nil // Already on the right shard with valid connection
 	}
 
-	// When switching shards, we default to the primary of that shard
+	// When switching shards or reconnecting, we default to the primary of that shard
 	addr := targetPool.GetPrimary()
 	return c.ensureBackendConn(addr, "primary", targetPool)
 }
@@ -323,6 +323,16 @@ func (c *clientConn) ensureBackendConn(addr string, name string, pool *replica.P
 	c.backendName = name
 
 	return nil
+}
+
+// resetBackend clears the backend connection state after an I/O error
+func (c *clientConn) resetBackend() {
+	if c.backend != nil {
+		c.backend.Close()
+		c.backend = nil
+	}
+	c.backendAddr = ""
+	c.backendName = ""
 }
 
 func (c *clientConn) handleLocalInfile(initialResponse []byte, moreResults bool) error {
@@ -621,28 +631,32 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 	if parsed.IsCacheable() {
 		cached, flags, ok := c.proxy.cache.Get(parsed.Query)
 		if ok {
-			// Handle stale data with background refresh
-			if flags == cache.FlagRefresh {
-				// First stale access - trigger background refresh
-				go c.refreshQueryInBackground(parsed.Query, parsed.TTL)
+			if flags == cache.FlagFresh {
+				// Fresh cache hit - serve immediately
+				metrics.CacheHits.WithLabelValues(file, lineStr).Inc()
+				metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "true").Inc()
+				metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
+				c.lastQueryBackend = "cache"
+				c.lastQueryCacheHit = true
+				return c.forwardBackendResponse(cached, moreResults)
 			}
-			// Serve from cache (fresh or stale)
-			metrics.CacheHits.WithLabelValues(file, lineStr).Inc()
-			metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "true").Inc()
-			metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
 
-			backend := "cache"
-			if flags != cache.FlagFresh {
-				backend = "cache (stale)"
+			if flags == cache.FlagStale {
+				// Stale but another request is already refreshing - serve stale
+				metrics.CacheHits.WithLabelValues(file, lineStr).Inc()
+				metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "true").Inc()
+				metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
+				c.lastQueryBackend = "cache (stale)"
+				c.lastQueryCacheHit = true
+				return c.forwardBackendResponse(cached, moreResults)
 			}
-			c.lastQueryBackend = backend
-			c.lastQueryCacheHit = true
 
-			return c.forwardBackendResponse(cached, moreResults)
+			// FlagRefresh: First stale access - this request does the refresh (sync)
+			// Fall through to query backend below
 		}
 		metrics.CacheMisses.WithLabelValues(file, lineStr).Inc()
 
-		// Cold cache: use single-flight pattern
+		// Cold cache or stale refresh: use single-flight pattern
 		cached, _, ok, waited := c.proxy.cache.GetOrWait(parsed.Query)
 		if waited && ok {
 			// Another goroutine fetched it for us
@@ -781,30 +795,6 @@ func (c *clientConn) handlePrepare(query string) error {
 	}
 
 	return c.forwardBackendResponse(fullResponse, false)
-}
-
-// refreshQueryInBackground refreshes a stale cache entry using an independent connection.
-func (c *clientConn) refreshQueryInBackground(query string, ttl int) {
-	// Don't hold c.mu while dialing or querying
-	c.mu.Lock()
-	backendAddr := c.backendAddr
-	c.mu.Unlock()
-
-	conn, err := c.dialAndAuth(backendAddr)
-	if err != nil {
-		log.Printf("[MariaDB] Background refresh failed (dial): %v", err)
-		return
-	}
-	defer conn.Close()
-
-	response, err := c.execQueryOnConn(conn, query)
-	if err != nil {
-		log.Printf("[MariaDB] Background refresh failed (query): %v", err)
-		return
-	}
-
-	// Update cache with fresh data
-	c.proxy.cache.Set(query, response, time.Duration(ttl)*time.Second)
 }
 
 func (c *clientConn) execQueryOnConn(conn net.Conn, query string) ([]byte, error) {
@@ -1149,6 +1139,7 @@ func (c *clientConn) readBackendPacket() ([]byte, error) {
 	c.backend.SetReadDeadline(time.Now().Add(backendTimeout))
 	if _, err := io.ReadFull(c.backend, header); err != nil {
 		c.backend.SetReadDeadline(time.Time{})
+		c.resetBackend()
 		return nil, err
 	}
 
@@ -1158,6 +1149,7 @@ func (c *clientConn) readBackendPacket() ([]byte, error) {
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(c.backend, payload); err != nil {
 		c.backend.SetReadDeadline(time.Time{})
+		c.resetBackend()
 		return nil, err
 	}
 
@@ -1175,6 +1167,9 @@ func (c *clientConn) writeBackendPacket(payload []byte) error {
 	c.backend.SetWriteDeadline(time.Now().Add(backendTimeout))
 	_, err := c.backend.Write(packet)
 	c.backend.SetWriteDeadline(time.Time{})
+	if err != nil {
+		c.resetBackend()
+	}
 	return err
 }
 
@@ -1417,7 +1412,7 @@ func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
 	}
 
 	// Build a synthetic query that returns the status as a result set
-	query := fmt.Sprintf("SELECT 'Backend' AS `Variable_name`, '%s' AS `Value` UNION ALL SELECT 'Shard', '%s' UNION ALL SELECT 'Cache_Hit', '%v'", backend, shard, c.lastQueryCacheHit)
+	query := fmt.Sprintf("SELECT 'Backend' AS `Variable_name`, '%s' AS `Value` UNION ALL SELECT 'Shard', '%s'", backend, shard)
 	response, err := c.execBackendQuery(query)
 	if err != nil {
 		return err
