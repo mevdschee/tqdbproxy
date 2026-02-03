@@ -97,14 +97,16 @@ Backend = primary, replicas[n], cache, cache (stale)
 
 ## Prometheus Metrics
 
-Exposed at `http://localhost:9090/metrics`:
+/* ttl:4 file:app.php line:42 */ SELECT SLEEP(2)
 
-- `tqdbproxy_query_total`: Queries by type, file, and line
-- `tqdbproxy_query_latency_seconds`: Latency histograms
-- `tqdbproxy_cache_hits_total`: Hit counters
-- `tqdbproxy_database_queries_total`: Actual backend traffic
+tqdbproxy_cache_hits_total{file="app.php",line="42"} 16
+tqdbproxy_cache_misses_total{file="app.php",line="42"} 2
+tqdbproxy_query_latency_seconds_sum{file="app.php",line="42",query_type="select"} 4.0013
+tqdbproxy_query_latency_seconds_count{file="app.php",line="42",query_type="select"} 18
+tqdbproxy_query_total{cached="false",file="app.php",line="42",query_type="select"} 2
+tqdbproxy_query_total{cached="true",file="app.php",line="42",query_type="select"} 16
 
-Labels are enriched with the `file` and `line` metadata hints.
+Use: curl localhost:9090/metrics -s | grep app.php
 
 ---
 
@@ -130,13 +132,14 @@ databases = logs
 
 ## Demo
 
-```bash
-mysql -u tqdbproxy tqdbproxy -ptqdbproxy -P 3307 --comments
-```
+# Start proxy on port 3307 (default)
+./tqdbproxy
+# Connect via MariaDB client (interactive mode)
+mariadb -u tqdbproxy -ptqdbproxy -P 3307 tqdbproxy --comments
+# Cache sleep 2 seconds query for 4 seconds (store 8 seconds)
+/* ttl:4 */ SELECT SLEEP(2); SHOW TQDB STATUS
 
-```sql
-/* ttl:2 */ select sleep(1); show tqdb status;
-```
+NB: In MariaDB CLI you **must** use the "--comments" flag to preserve comments
 
 ---
 
@@ -163,7 +166,7 @@ mysql -u tqdbproxy tqdbproxy -ptqdbproxy -P 3307 --comments
 
 - Databases are fast, **NVMe drives** have ridiculous performance
 - Trade durability for performance first, if possible (**periodic fsync**)
-- 1M QPS is quite easy: (smart) **caches** + (read) **replicas** + (database) **shards**
+- 1M QPS recipe: (smart) **caches** + (read) **replicas** + (database) **shards**
 
 ---
 
