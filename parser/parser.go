@@ -82,10 +82,34 @@ func Parse(query string) *ParsedQuery {
 		p.Query = strings.TrimSpace(p.Query)
 	}
 
+	// TTL is silently ignored for writes
+	if p.IsWritable() && p.TTL > 0 {
+		p.TTL = 0
+	}
+
 	return p
 }
 
 // IsCacheable returns true if query can be cached
 func (p *ParsedQuery) IsCacheable() bool {
 	return p.Type == QuerySelect && p.TTL > 0
+}
+
+// IsWritable returns true if query is a write operation (INSERT, UPDATE, DELETE)
+func (p *ParsedQuery) IsWritable() bool {
+	return p.Type == QueryInsert ||
+		p.Type == QueryUpdate ||
+		p.Type == QueryDelete
+}
+
+// IsBatchable returns true if write can be batched
+// Note: Transaction state is tracked at connection level
+func (p *ParsedQuery) IsBatchable() bool {
+	return p.IsWritable()
+}
+
+// GetBatchKey returns a key for grouping writes for batching
+// Uses the same approach as cache keys (the query itself)
+func (p *ParsedQuery) GetBatchKey() string {
+	return p.Query
 }

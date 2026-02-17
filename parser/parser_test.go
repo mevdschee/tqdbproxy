@@ -114,3 +114,239 @@ func TestCacheKey_DifferentParams(t *testing.T) {
 		t.Errorf("Identical queries should have same cache key")
 	}
 }
+
+func TestParsedQuery_IsWritable(t *testing.T) {
+	tests := []struct {
+		query    string
+		writable bool
+	}{
+		{"SELECT * FROM users", false},
+		{"INSERT INTO users (name) VALUES ('test')", true},
+		{"UPDATE users SET name = 'test'", true},
+		{"DELETE FROM users WHERE id = 1", true},
+		{"BEGIN", false},
+		{"COMMIT", false},
+		{"ROLLBACK", false},
+		{"/* file:app.go line:10 */ INSERT INTO logs VALUES (1)", true},
+		{"/* ttl:60 */ SELECT * FROM users", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.IsWritable() != tt.writable {
+				t.Errorf("IsWritable() = %v, want %v", p.IsWritable(), tt.writable)
+			}
+		})
+	}
+}
+
+func TestParsedQuery_IsBatchable(t *testing.T) {
+	tests := []struct {
+		query     string
+		batchable bool
+	}{
+		{"INSERT INTO users (name) VALUES ('test')", true},
+		{"UPDATE users SET name = 'test'", true},
+		{"DELETE FROM users WHERE id = 1", true},
+		{"SELECT * FROM users", false},
+		{"BEGIN", false},
+		{"/* file:app.go line:42 */ INSERT INTO logs VALUES (1)", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.IsBatchable() != tt.batchable {
+				t.Errorf("IsBatchable() = %v, want %v", p.IsBatchable(), tt.batchable)
+			}
+		})
+	}
+}
+
+func TestParsedQuery_GetBatchKey(t *testing.T) {
+	tests := []struct {
+		query       string
+		expectedKey string
+	}{
+		{
+			"/* file:app.go line:42 */ INSERT INTO users VALUES (1)",
+			"INSERT INTO users VALUES (1)", // Hint is stripped
+		},
+		{
+			"/* file:src/handler.go line:100 */ UPDATE users SET active = 1",
+			"UPDATE users SET active = 1",
+		},
+		{
+			"INSERT INTO users VALUES (1)",
+			"INSERT INTO users VALUES (1)",
+		},
+		{
+			"INSERT INTO users VALUES (2)",
+			"INSERT INTO users VALUES (2)", // Different values = different key
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			key := p.GetBatchKey()
+			if key != tt.expectedKey {
+				t.Errorf("GetBatchKey() = %v, want %v", key, tt.expectedKey)
+			}
+		})
+	}
+}
+
+func TestParsedQuery_GetBatchKey_SameQuery(t *testing.T) {
+	// Identical queries should have the same batch key
+	q1 := Parse("/* file:app.go line:42 */ INSERT INTO users (name) VALUES ('alice')")
+	q2 := Parse("/* file:handler.go line:10 */ INSERT INTO users (name) VALUES ('alice')")
+
+	key1 := q1.GetBatchKey()
+	key2 := q2.GetBatchKey()
+
+	// Same query (hints stripped) = same batch key
+	if key1 != key2 {
+		t.Errorf("Identical queries should have same batch key: %v != %v", key1, key2)
+	}
+
+	expected := "INSERT INTO users (name) VALUES ('alice')"
+	if key1 != expected {
+		t.Errorf("GetBatchKey() = %v, want %v", key1, expected)
+	}
+}
+
+func TestParsedQuery_GetBatchKey_DifferentQueries(t *testing.T) {
+	// Different queries should have different batch keys
+	q1 := Parse("INSERT INTO users (name) VALUES ('alice')")
+	q2 := Parse("INSERT INTO users (name) VALUES ('bob')")
+
+	key1 := q1.GetBatchKey()
+	key2 := q2.GetBatchKey()
+
+	if key1 == key2 {
+		t.Errorf("Different queries should have different batch keys")
+	}
+
+	if key1 != "INSERT INTO users (name) VALUES ('alice')" {
+		t.Errorf("GetBatchKey() for q1 = %v, want 'INSERT INTO users (name) VALUES ('alice')'", key1)
+	}
+
+	if key2 != "INSERT INTO users (name) VALUES ('bob')" {
+		t.Errorf("GetBatchKey() for q2 = %v, want 'INSERT INTO users (name) VALUES ('bob')'", key2)
+	}
+}
+
+func TestParsedQuery_GetBatchKey_ConsistentWithCacheKey(t *testing.T) {
+	// GetBatchKey should use Query field, same as caching does
+	query1 := "/* ttl:60 */ SELECT * FROM users WHERE id = 1"
+	query2 := "INSERT INTO users (name) VALUES ('test')"
+
+	p1 := Parse(query1)
+	p2 := Parse(query2)
+
+	// For caching, we use p.Query (cleaned query)
+	// For batching, GetBatchKey() should also return p.Query
+	if p1.GetBatchKey() != p1.Query {
+		t.Errorf("GetBatchKey() should return Query field for consistency with caching")
+	}
+
+	if p2.GetBatchKey() != p2.Query {
+		t.Errorf("GetBatchKey() should return Query field for consistency with caching")
+	}
+}
+
+func TestParsedQuery_IsCacheable_ExcludesWrites(t *testing.T) {
+	// Ensure IsCacheable explicitly excludes write operations
+	tests := []struct {
+		query    string
+		expected bool
+	}{
+		{"/* ttl:60 */ SELECT * FROM users", true},
+		{"/* ttl:60 */ INSERT INTO users VALUES (1)", false},
+		{"/* ttl:60 */ UPDATE users SET active = 1", false},
+		{"/* ttl:60 */ DELETE FROM users WHERE id = 1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.IsCacheable() != tt.expected {
+				t.Errorf("IsCacheable() = %v, want %v (writes should not be cacheable)", p.IsCacheable(), tt.expected)
+			}
+		})
+	}
+}
+
+func TestParsedQuery_PreparedStatements(t *testing.T) {
+	// Test that prepared statements are correctly identified as batchable
+	tests := []struct {
+		query      string
+		writeable  bool
+		batchable  bool
+	}{
+		{"INSERT INTO users (name, email) VALUES (?, ?)", true, true},
+		{"UPDATE users SET name = ? WHERE id = ?", true, true},
+		{"DELETE FROM users WHERE id = ?", true, true},
+		{"SELECT * FROM users WHERE id = ?", false, false},
+		{"INSERT INTO users (name) VALUES ($1)", true, true},
+		{"UPDATE users SET active = $1 WHERE id = $2", true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.IsWritable() != tt.writeable {
+				t.Errorf("IsWritable() = %v, want %v", p.IsWritable(), tt.writeable)
+			}
+			if p.IsBatchable() != tt.batchable {
+				t.Errorf("IsBatchable() = %v, want %v", p.IsBatchable(), tt.batchable)
+			}
+		})
+	}
+}
+
+func TestParsedQuery_WriteTTLWarning(t *testing.T) {
+	// Test that TTL is ignored for write operations
+	tests := []struct {
+		query       string
+		expectedTTL int
+		description string
+	}{
+		{
+			query:       "/* ttl:60 */ INSERT INTO users VALUES (1)",
+			expectedTTL: 0,
+			description: "INSERT with TTL should have TTL set to 0",
+		},
+		{
+			query:       "/* ttl:300 */ UPDATE users SET active = 1",
+			expectedTTL: 0,
+			description: "UPDATE with TTL should have TTL set to 0",
+		},
+		{
+			query:       "/* ttl:120 */ DELETE FROM users WHERE id = 1",
+			expectedTTL: 0,
+			description: "DELETE with TTL should have TTL set to 0",
+		},
+		{
+			query:       "/* ttl:60 */ SELECT * FROM users",
+			expectedTTL: 60,
+			description: "SELECT with TTL should preserve TTL",
+		},
+		{
+			query:       "INSERT INTO users VALUES (1)",
+			expectedTTL: 0,
+			description: "INSERT without TTL should have TTL 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.TTL != tt.expectedTTL {
+				t.Errorf("Parse(%q).TTL = %v, want %v: %s", tt.query, p.TTL, tt.expectedTTL, tt.description)
+			}
+		})
+	}
+}
