@@ -15,6 +15,11 @@ type Manager struct {
 	db           *sql.DB
 	currentDelay atomic.Int64 // in microseconds
 	closed       atomic.Bool
+
+	// Throughput tracking
+	opsPerSecond atomic.Uint64 // Current operations per second
+	opsCounter   atomic.Uint64 // Total ops executed in current window
+	lastReset    atomic.Int64  // Unix timestamp of last reset
 }
 
 // New creates a new write batch manager
@@ -24,6 +29,7 @@ func New(db *sql.DB, config Config) *Manager {
 		config: config,
 	}
 	m.currentDelay.Store(int64(config.InitialDelayMs * 1000))
+	m.lastReset.Store(time.Now().Unix())
 	return m
 }
 
@@ -107,4 +113,41 @@ func (m *Manager) Close() error {
 	// Wait for in-flight batches to complete
 	time.Sleep(time.Duration(m.config.MaxDelayMs) * time.Millisecond * 2)
 	return nil
+}
+
+// updateThroughput updates the operations per second metric
+func (m *Manager) updateThroughput(batchSize int) {
+	m.opsCounter.Add(uint64(batchSize))
+
+	// Calculate ops/sec over the last second
+	now := time.Now().Unix()
+	lastReset := m.lastReset.Load()
+
+	if now > lastReset {
+		ops := m.opsCounter.Swap(0)
+		elapsed := now - lastReset
+		if elapsed > 0 {
+			opsPerSec := ops / uint64(elapsed)
+			m.opsPerSecond.Store(opsPerSec)
+		}
+		m.lastReset.Store(now)
+	}
+}
+
+// forceThroughputUpdate manually triggers a throughput calculation (for testing)
+func (m *Manager) forceThroughputUpdate() {
+	now := time.Now().Unix()
+	lastReset := m.lastReset.Load()
+	ops := m.opsCounter.Load()
+
+	elapsed := now - lastReset
+	if elapsed > 0 {
+		opsPerSec := ops / uint64(elapsed)
+		m.opsPerSecond.Store(opsPerSec)
+	} else if elapsed == 0 && ops > 0 {
+		// All ops happened within same second, estimate as ops * 1
+		m.opsPerSecond.Store(ops)
+	}
+	m.opsCounter.Store(0)
+	m.lastReset.Store(now)
 }

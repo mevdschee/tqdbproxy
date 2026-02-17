@@ -35,14 +35,22 @@ type Config struct {
 	MaxDelayMs     int // Maximum delay before executing batch (100ms default)
 	MinDelayMs     int // Minimum delay (0ms default)
 	MaxBatchSize   int // Maximum number of operations per batch (1000 default)
+
+	// Adaptive delay settings
+	WriteThreshold  int     // ops/sec threshold to increase delay (1000 default)
+	AdaptiveStep    float64 // Multiplier for delay adjustment (1.5 default)
+	MetricsInterval int     // Seconds between adjustments (1 default)
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
-		InitialDelayMs: 1,
-		MaxDelayMs:     100,
-		MinDelayMs:     0,
-		MaxBatchSize:   1000,
+		InitialDelayMs:  1,
+		MaxDelayMs:      100,
+		MinDelayMs:      0,
+		MaxBatchSize:    1000,
+		WriteThreshold:  1000,
+		AdaptiveStep:    1.5,
+		MetricsInterval: 1,
 	}
 }

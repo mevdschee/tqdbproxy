@@ -15,21 +15,25 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 
 	group.mu.Lock()
 	requests := group.Requests
+	batchSize := len(requests)
 	group.Requests = nil
 	group.mu.Unlock()
 
 	// Try to delete this group from the map (it might already be deleted if batch was full)
 	m.groups.CompareAndDelete(batchKey, group)
 
-	if len(requests) == 0 {
+	if batchSize == 0 {
 		return
 	}
 
-	if len(requests) == 1 {
+	if batchSize == 1 {
 		m.executeSingle(requests[0])
 	} else {
 		m.executeBatchedWrites(requests)
 	}
+
+	// Update throughput metrics
+	m.updateThroughput(batchSize)
 }
 
 // executeSingle executes a single write request
