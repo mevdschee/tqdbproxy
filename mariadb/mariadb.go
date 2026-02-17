@@ -23,6 +23,7 @@ import (
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
 	"github.com/mevdschee/tqdbproxy/replica"
+	"github.com/mevdschee/tqdbproxy/writebatch"
 )
 
 const (
@@ -31,23 +32,36 @@ const (
 
 // Proxy implements a MariaDB server that forwards to backend
 type Proxy struct {
-	config    config.ProxyConfig
-	pools     map[string]*replica.Pool
-	cache     *cache.Cache
-	db        *sql.DB
-	connID    uint32 // Managed atomically
-	listeners []net.Listener
-	mu        sync.RWMutex
+	config     config.ProxyConfig
+	pools      map[string]*replica.Pool
+	cache      *cache.Cache
+	db         *sql.DB
+	connID     uint32 // Managed atomically
+	listeners  []net.Listener
+	mu         sync.RWMutex
+	writeBatch *writebatch.Manager
+	wbCtx      context.Context
+	wbCancel   context.CancelFunc
 }
 
 // New creates a new MariaDB proxy
 func New(pcfg config.ProxyConfig, pools map[string]*replica.Pool, c *cache.Cache) *Proxy {
-	return &Proxy{
+	p := &Proxy{
 		config: pcfg,
 		pools:  pools,
 		cache:  c,
 		connID: 1000,
 	}
+
+	// Initialize write batching if enabled (actual manager created in Start after db connection)
+	if pcfg.WriteBatch.Enabled {
+		p.wbCtx, p.wbCancel = context.WithCancel(context.Background())
+		log.Printf("[MariaDB] Write batching will be enabled (delay: %dms-%dms, batch size: %d, threshold: %d ops/s)",
+			pcfg.WriteBatch.MinDelayMs, pcfg.WriteBatch.MaxDelayMs,
+			pcfg.WriteBatch.MaxBatchSize, int(pcfg.WriteBatch.WriteThreshold))
+	}
+
+	return p
 }
 
 // UpdateConfig updates the proxy configuration and pools
@@ -83,6 +97,22 @@ func (p *Proxy) Start() error {
 	}
 	p.db = db
 
+	// Initialize write batching if enabled
+	if p.config.WriteBatch.Enabled {
+		wbCfg := writebatch.Config{
+			InitialDelayMs:  p.config.WriteBatch.InitialDelayMs,
+			MaxDelayMs:      p.config.WriteBatch.MaxDelayMs,
+			MinDelayMs:      p.config.WriteBatch.MinDelayMs,
+			MaxBatchSize:    p.config.WriteBatch.MaxBatchSize,
+			WriteThreshold:  int(p.config.WriteBatch.WriteThreshold),
+			AdaptiveStep:    p.config.WriteBatch.AdaptiveStep,
+			MetricsInterval: p.config.WriteBatch.MetricsInterval,
+		}
+		p.writeBatch = writebatch.New(db, wbCfg)
+		p.writeBatch.StartAdaptiveAdjustment(p.wbCtx)
+		log.Printf("[MariaDB] Write batching started")
+	}
+
 	// Start TCP listener
 	tcpListener, err := net.Listen("tcp", listen)
 	if err != nil {
@@ -115,6 +145,16 @@ func (p *Proxy) Start() error {
 func (p *Proxy) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Stop write batching
+	if p.writeBatch != nil {
+		if err := p.writeBatch.Close(); err != nil {
+			log.Printf("[MariaDB] Error closing write batch manager: %v", err)
+		}
+	}
+	if p.wbCancel != nil {
+		p.wbCancel()
+	}
 
 	var errs []error
 	for _, listener := range p.listeners {
@@ -220,6 +260,9 @@ type clientConn struct {
 
 	// Prepared statements
 	preparedStatements map[uint32]string
+
+	// Transaction state
+	inTransaction bool
 }
 
 func (c *clientConn) writeServerGreeting() error {
@@ -527,6 +570,7 @@ func (c *clientConn) handleBegin(moreResults bool) error {
 		return err
 	}
 	c.status |= mysql.StatusInTrans
+	c.inTransaction = true
 	return c.writeOKWithInfo("", moreResults)
 }
 
@@ -536,6 +580,7 @@ func (c *clientConn) handleCommit(moreResults bool) error {
 		return err
 	}
 	c.status &= ^mysql.StatusInTrans
+	c.inTransaction = false
 	return c.writeOKWithInfo("", moreResults)
 }
 
@@ -545,6 +590,7 @@ func (c *clientConn) handleRollback(moreResults bool) error {
 		return err
 	}
 	c.status &= ^mysql.StatusInTrans
+	c.inTransaction = false
 	return c.writeOKWithInfo("", moreResults)
 }
 
@@ -625,6 +671,11 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 	// Check for custom SHOW TQDB STATUS command
 	if queryUpper == "SHOW TQDB STATUS" {
 		return c.handleShowTQDBStatus(moreResults)
+	}
+
+	// Route batchable writes to write batch manager (only outside transactions)
+	if c.proxy.writeBatch != nil && !c.inTransaction && parsed.IsWritable() && parsed.IsBatchable() {
+		return c.handleBatchedWrite(parsed.Query, start, file, lineStr, queryType, moreResults)
 	}
 
 	// Check cache with thundering herd protection
@@ -1420,6 +1471,78 @@ func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
 
 	return c.forwardBackendResponse(response, moreResults)
 }
+
+func (c *clientConn) handleBatchedWrite(query string, start time.Time, file, lineStr, queryType string, moreResults bool) error {
+	// Parse the query to get the batch key
+	parsed := parser.Parse(query)
+	batchKey := parsed.GetBatchKey()
+
+	// Enqueue the write (blocks until result is available)
+	ctx := context.Background()
+	result := c.proxy.writeBatch.Enqueue(ctx, batchKey, query, nil)
+
+	// Record metrics
+	metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "false").Inc()
+	metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
+
+	// Handle error
+	if result.Error != nil {
+		// Fall back to immediate execution on certain errors
+		if result.Error == writebatch.ErrManagerClosed || result.Error == writebatch.ErrTimeout {
+			log.Printf("[MariaDB] Write batch error (%v), executing immediately", result.Error)
+			return c.executeImmediateWrite(query, start, file, lineStr, queryType, moreResults)
+		}
+		return c.writeError(result.Error)
+	}
+
+	// Track metadata
+	c.lastQueryBackend = "write-batch"
+	c.lastQueryCacheHit = false
+
+	// Send OK packet with affected rows and last insert ID
+	return c.writeOKWithRowsAndID(result.AffectedRows, result.LastInsertID, moreResults)
+}
+
+func (c *clientConn) executeImmediateWrite(query string, start time.Time, file, lineStr, queryType string, moreResults bool) error {
+	// Ensure we have a backend connection
+	backendAddr := c.backendPool.GetPrimary()
+	backendName := "primary"
+
+	if err := c.ensureBackendConn(backendAddr, backendName, c.backendPool); err != nil {
+		return err
+	}
+
+	response, err := c.execBackendQuery(query)
+	if err != nil {
+		return err
+	}
+
+	metrics.DatabaseQueries.WithLabelValues(backendName).Inc()
+	metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "false").Inc()
+	metrics.QueryLatency.WithLabelValues(file, lineStr, queryType).Observe(time.Since(start).Seconds())
+
+	c.lastQueryBackend = backendName
+	c.lastQueryCacheHit = false
+
+	return c.forwardBackendResponse(response, moreResults)
+}
+
+func (c *clientConn) writeOKWithRowsAndID(affectedRows, lastInsertID int64, moreResults bool) error {
+	c.sequence++
+	status := c.status
+	if moreResults {
+		status |= mysql.StatusMoreResultsExists
+	}
+	packet := mysql.WriteOKPacket(uint64(affectedRows), uint64(lastInsertID), status, c.capability)
+	// Add header
+	payload := make([]byte, 4+len(packet))
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(packet)))
+	payload[3] = c.sequence
+	copy(payload[4:], packet)
+	_, err := c.conn.Write(payload)
+	return err
+}
+
 func splitQueries(query string) []string {
 	var queries []string
 	var current strings.Builder
