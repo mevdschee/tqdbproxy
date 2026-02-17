@@ -282,9 +282,9 @@ func TestParsedQuery_IsCacheable_ExcludesWrites(t *testing.T) {
 func TestParsedQuery_PreparedStatements(t *testing.T) {
 	// Test that prepared statements are correctly identified as batchable
 	tests := []struct {
-		query      string
-		writeable  bool
-		batchable  bool
+		query     string
+		writeable bool
+		batchable bool
 	}{
 		{"INSERT INTO users (name, email) VALUES (?, ?)", true, true},
 		{"UPDATE users SET name = ? WHERE id = ?", true, true},
