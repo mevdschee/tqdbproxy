@@ -10,6 +10,7 @@
 
 Implement automatic delay adjustment based on write throughput to optimize batch
 
+
 sizes dynamically.
 
 ## Prerequisites
@@ -377,6 +378,8 @@ go test ./writebatch -v -run "TestAdaptiveDelay_IncreasesUnderLoad"
 
 Document recommended settings for different workloads:
 
+
+ 
 - **Low Latency** (< 1000 TPS): InitialDelay=0, Threshold=500
 - **Balanced** (1k-10k TPS): InitialDelay=1ms, Threshold=1000
 - **High Throughput** (>10k TPS): InitialDelay=5ms, Threshold=5000
