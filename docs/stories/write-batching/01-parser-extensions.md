@@ -8,7 +8,8 @@
 
 ## Overview
 
-Extend the SQL parser to identify and classify write operations (INSERT, UPDATE, DELETE) and provide the necessary type system support for write batching.
+Extend the SQL parser to identify and classify write operations (INSERT, UPDATE,
+DELETE) and provide the necessary type system support for write batching.
 
 ## Goals
 
@@ -20,6 +21,7 @@ Extend the SQL parser to identify and classify write operations (INSERT, UPDATE,
 ## Tasks
 
 ### 1. Extend ParsedQuery Type
+
 - [ ] Add `IsWritable()` method to identify INSERT/UPDATE/DELETE
 - [ ] Add `IsBatchable()` method to check if write can be batched
 - [ ] Add `GetBatchKey()` method to generate file:line identifier
@@ -153,4 +155,6 @@ go test ./parser -v
 ## Next Steps
 
 After completion, proceed to:
-- [02-write-batch-manager.md](02-write-batch-manager.md) - Implement the core batch manager
+
+- [02-write-batch-manager.md](02-write-batch-manager.md) - Implement the core
+  batch manager

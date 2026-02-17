@@ -1,10 +1,12 @@
 # Write Batching Implementation Sub-Plans
 
-This directory contains the detailed sub-plans for implementing write operation batching in TQDBProxy.
+This directory contains the detailed sub-plans for implementing write operation
+batching in TQDBProxy.
 
 ## Overview
 
-The write batching feature is split into 7 manageable sub-plans, each focusing on a specific aspect of the implementation.
+The write batching feature is split into 7 manageable sub-plans, each focusing
+on a specific aspect of the implementation.
 
 ## Sub-Plans
 
@@ -65,7 +67,8 @@ The write batching feature is split into 7 manageable sub-plans, each focusing o
 07-testing-validation
 ```
 
-Sub-plans 1-4 can have some parallel work, but generally follow the sequence above.
+Sub-plans 1-4 can have some parallel work, but generally follow the sequence
+above.
 
 ## Getting Started
 
@@ -78,6 +81,7 @@ Sub-plans 1-4 can have some parallel work, but generally follow the sequence abo
 ## Tracking Progress
 
 Each sub-plan has:
+
 - **Status**: Not Started | In Progress | Completed
 - **Estimated Effort**: Days to complete
 - **Prerequisites**: What must be done first
@@ -87,7 +91,8 @@ Each sub-plan has:
 
 ## Parent Story
 
-See [../WRITE_BATCHING.md](../WRITE_BATCHING.md) for the complete feature story and high-level design.
+See [../WRITE_BATCHING.md](../WRITE_BATCHING.md) for the complete feature story
+and high-level design.
 
 ## Questions or Issues?
 

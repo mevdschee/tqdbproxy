@@ -8,7 +8,8 @@
 
 ## Overview
 
-Implement the core write batch manager that groups, delays, and executes write operations in batches.
+Implement the core write batch manager that groups, delays, and executes write
+operations in batches.
 
 ## Prerequisites
 
@@ -467,4 +468,6 @@ go test ./writebatch -bench=. -benchmem
 ## Next Steps
 
 After completion, proceed to:
-- [03-adaptive-delay-system.md](03-adaptive-delay-system.md) - Add adaptive delay scaling
+
+- [03-adaptive-delay-system.md](03-adaptive-delay-system.md) - Add adaptive
+  delay scaling

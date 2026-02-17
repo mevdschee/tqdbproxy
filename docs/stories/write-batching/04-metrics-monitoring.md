@@ -8,7 +8,8 @@
 
 ## Overview
 
-Add comprehensive Prometheus metrics for write batching to enable monitoring, alerting, and performance analysis.
+Add comprehensive Prometheus metrics for write batching to enable monitoring,
+alerting, and performance analysis.
 
 ## Prerequisites
 
@@ -304,35 +305,42 @@ func TestMetrics_BatchSizeRecorded(t *testing.T) {
 - [ ] Provide example Prometheus queries
 - [ ] Create sample Grafana dashboard JSON
 
-```markdown
+````markdown
 # Write Batch Metrics
 
 ## Available Metrics
 
 ### tqdbproxy_write_batch_size
+
 Histogram of batch sizes (number of operations batched together).
 
 **Labels**: `batch_key` (file:line identifier)
 
 **Example Query**:
+
 ```promql
 # Average batch size
 rate(tqdbproxy_write_batch_size_sum[5m]) / rate(tqdbproxy_write_batch_size_count[5m])
 ```
+````
 
 ### tqdbproxy_write_ops_per_second
+
 Current write throughput (gauge).
 
 **Example Query**:
+
 ```promql
 # Current write TPS
 tqdbproxy_write_ops_per_second
 ```
 
 ### tqdbproxy_write_current_delay_ms
+
 Current adaptive delay in milliseconds.
 
 **Example Query**:
+
 ```promql
 # Delay over time
 tqdbproxy_write_current_delay_ms
@@ -340,9 +348,10 @@ tqdbproxy_write_current_delay_ms
 
 ## Grafana Dashboard
 
-See [grafana-dashboard.json](./grafana-dashboard.json) for a pre-built dashboard.
-```
+See [grafana-dashboard.json](./grafana-dashboard.json) for a pre-built
+dashboard.
 
+````
 ## Dependencies
 
 - Write batch manager (Sub-Plan 2)
@@ -368,7 +377,7 @@ curl http://localhost:9090/metrics | grep tqdbproxy_write
 
 # Verify metrics appear
 curl http://localhost:9090/metrics | grep -E "write_batch_size|write_ops_per_second|write_current_delay"
-```
+````
 
 ## Sample Grafana Queries
 
@@ -389,4 +398,6 @@ tqdbproxy_write_ops_per_second
 ## Next Steps
 
 After completion, proceed to:
-- [05-proxy-integration.md](05-proxy-integration.md) - Integrate with MariaDB and PostgreSQL proxies
+
+- [05-proxy-integration.md](05-proxy-integration.md) - Integrate with MariaDB
+  and PostgreSQL proxies

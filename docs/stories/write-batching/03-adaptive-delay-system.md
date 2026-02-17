@@ -8,7 +8,8 @@
 
 ## Overview
 
-Implement automatic delay adjustment based on write throughput to optimize batch sizes dynamically.
+Implement automatic delay adjustment based on write throughput to optimize batch
+sizes dynamically.
 
 ## Prerequisites
 
@@ -376,4 +377,6 @@ Document recommended settings for different workloads:
 ## Next Steps
 
 After completion, proceed to:
-- [04-metrics-monitoring.md](04-metrics-monitoring.md) - Add comprehensive metrics
+
+- [04-metrics-monitoring.md](04-metrics-monitoring.md) - Add comprehensive
+  metrics

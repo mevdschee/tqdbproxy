@@ -2,7 +2,9 @@
 
 ## Overview
 
-Implement a comprehensive write batching system for INSERT, UPDATE, and DELETE operations that mirrors the read optimization pattern currently used for SELECT queries. This feature will:
+Implement a comprehensive write batching system for INSERT, UPDATE, and DELETE
+operations that mirrors the read optimization pattern currently used for SELECT
+queries. This feature will:
 
 1. Identify and track write operations by source file and line number
 2. Group write operations by their origin (file:line)
@@ -15,20 +17,26 @@ Implement a comprehensive write batching system for INSERT, UPDATE, and DELETE o
 ## Background
 
 Currently, TQDBProxy implements sophisticated read optimization:
+
 - Read queries (SELECT) are identified via parser
 - Grouped by cache key (query + parameters)
 - Cold cache uses single-flight pattern (GetOrWait)
 - Warm cache serves stale while refreshing
 - File and line tracking for metrics
 
-Write operations currently go directly to the database without batching or optimization.
+Write operations currently go directly to the database without batching or
+optimization.
 
 ## Goals
 
-1. **Reduce Database Load**: Batch multiple write operations to reduce connection overhead
-2. **Improve Throughput**: Execute writes in groups to leverage database batch processing
-3. **Maintain Correctness**: Ensure all writes are executed and results properly returned
-4. **Adaptive Performance**: Automatically adjust batching behavior based on write load
+1. **Reduce Database Load**: Batch multiple write operations to reduce
+   connection overhead
+2. **Improve Throughput**: Execute writes in groups to leverage database batch
+   processing
+3. **Maintain Correctness**: Ensure all writes are executed and results properly
+   returned
+4. **Adaptive Performance**: Automatically adjust batching behavior based on
+   write load
 5. **Observable**: Provide metrics on batch sizes, delays, and throughput
 
 ## Non-Goals
@@ -42,12 +50,15 @@ Write operations currently go directly to the database without batching or optim
 ## User Stories
 
 ### As a Developer
+
 - I want my write operations automatically batched when possible
 - I want to receive individual results for each write operation
 - I want visibility into write performance via metrics
 
 ### As a DBA
-- I want to reduce the number of individual write operations hitting the database
+
+- I want to reduce the number of individual write operations hitting the
+  database
 - I want configurable batching parameters to tune for our workload
 - I want metrics showing batch effectiveness
 
@@ -528,15 +539,18 @@ metrics_interval = 1
 
 ## Implementation Plan
 
-The implementation is split into **7 detailed sub-plans** located in [docs/stories/write-batching/](write-batching/):
+The implementation is split into **7 detailed sub-plans** located in
+[docs/stories/write-batching/](write-batching/):
 
 ### [Sub-Plan 1: Parser Extensions](write-batching/01-parser-extensions.md) (2-3 days)
+
 - [ ] Add `IsWritable()`, `IsBatchable()`, `GetBatchKey()` methods
 - [ ] Implement batch key generation from file:line
 - [ ] Add comprehensive parser tests
 - [ ] Update parser documentation
 
 ### [Sub-Plan 2: Write Batch Manager Core](write-batching/02-write-batch-manager.md) (5-7 days)
+
 - [ ] Create `writebatch/` package structure
 - [ ] Implement core types (WriteRequest, BatchGroup, Manager)
 - [ ] Implement batching logic with delays
@@ -544,6 +558,7 @@ The implementation is split into **7 detailed sub-plans** located in [docs/stori
 - [ ] Unit tests for manager and executor
 
 ### [Sub-Plan 3: Adaptive Delay System](write-batching/03-adaptive-delay-system.md) (3-4 days)
+
 - [ ] Implement throughput tracking
 - [ ] Add adaptive delay adjustment logic
 - [ ] Implement background adjustment goroutine
@@ -551,6 +566,7 @@ The implementation is split into **7 detailed sub-plans** located in [docs/stori
 - [ ] Validate min/max delay bounds
 
 ### [Sub-Plan 4: Metrics and Monitoring](write-batching/04-metrics-monitoring.md) (2-3 days)
+
 - [ ] Define Prometheus metrics for write batching
 - [ ] Integrate metrics into manager and adaptive system
 - [ ] Create helper functions for metric extraction
@@ -558,6 +574,7 @@ The implementation is split into **7 detailed sub-plans** located in [docs/stori
 - [ ] Create sample Grafana dashboard
 
 ### [Sub-Plan 5: Proxy Integration](write-batching/05-proxy-integration.md) (4-5 days)
+
 - [ ] Add transaction state tracking to both proxies
 - [ ] Integrate WriteBatch manager into proxy structs
 - [ ] Route writes to batch manager (exclude transactions)
@@ -566,6 +583,7 @@ The implementation is split into **7 detailed sub-plans** located in [docs/stori
 - [ ] Integration tests
 
 ### [Sub-Plan 6: Benchmark Suite](write-batching/06-benchmark-suite.md) (3-4 days)
+
 - [ ] Create pgx-based benchmark framework
 - [ ] Implement load generators for 1k, 10k, 100k, 1M TPS
 - [ ] Add metrics querying and parsing
@@ -574,6 +592,7 @@ The implementation is split into **7 detailed sub-plans** located in [docs/stori
 - [ ] Document benchmark results
 
 ### [Sub-Plan 7: Testing and Validation](write-batching/07-testing-validation.md) (3-4 days)
+
 - [ ] Achieve >90% code coverage
 - [ ] Integration tests for MariaDB and PostgreSQL
 - [ ] Load and stress tests
@@ -584,11 +603,13 @@ The implementation is split into **7 detailed sub-plans** located in [docs/stori
 
 **Total Estimated Effort**: 22-30 days (4.5-6 weeks)
 
-See [write-batching/README.md](write-batching/README.md) for detailed sub-plan overview and dependencies.
+See [write-batching/README.md](write-batching/README.md) for detailed sub-plan
+overview and dependencies.
 
 ## Testing Strategy
 
 ### Unit Tests
+
 - Parser write operation identification
 - Transaction state detection
 - Batch group management
@@ -596,6 +617,7 @@ See [write-batching/README.md](write-batching/README.md) for detailed sub-plan o
 - Metrics recording
 
 ### Integration Tests
+
 - Single write execution
 - Batch execution with identical queries
 - Batch execution with mixed queries
@@ -605,6 +627,7 @@ See [write-batching/README.md](write-batching/README.md) for detailed sub-plan o
 - Transaction state tracking (BEGIN/COMMIT/ROLLBACK)
 
 ### Performance Tests
+
 - Throughput improvement vs direct execution
 - Latency distribution
 - Adaptive delay behavior
@@ -612,6 +635,7 @@ See [write-batching/README.md](write-batching/README.md) for detailed sub-plan o
 - Connection pool efficiency
 
 ### Load Tests
+
 - Sustained high write rate
 - Burst writes
 - Mixed read/write workload
@@ -619,9 +643,11 @@ See [write-batching/README.md](write-batching/README.md) for detailed sub-plan o
 
 ### Adaptive Delay Scaling Benchmark
 
-Create a comprehensive benchmark using a pgx-based PostgreSQL client to validate automatic delay scaling:
+Create a comprehensive benchmark using a pgx-based PostgreSQL client to validate
+automatic delay scaling:
 
 **Benchmark Setup:**
+
 - Client: pgx (Go PostgreSQL driver)
 - Test duration: 1 second per test
 - Write operations: Simple INSERT statements from same file:line
@@ -629,12 +655,12 @@ Create a comprehensive benchmark using a pgx-based PostgreSQL client to validate
 
 **Test Cases:**
 
-| Target TPS | Expected Delay | Expected Behavior |
-|-----------|----------------|-------------------|
-| 1,000     | 0-1ms         | Low load, minimal batching |
-| 10,000    | 1-5ms         | Moderate load, small batches |
-| 100,000   | 10-20ms       | High load, medium batches |
-| 1,000,000 | 100ms         | Very high load, large batches |
+| Target TPS | Expected Delay | Expected Behavior             |
+| ---------- | -------------- | ----------------------------- |
+| 1,000      | 0-1ms          | Low load, minimal batching    |
+| 10,000     | 1-5ms          | Moderate load, small batches  |
+| 100,000    | 10-20ms        | High load, medium batches     |
+| 1,000,000  | 100ms          | Very high load, large batches |
 
 **Implementation:**
 
@@ -838,6 +864,7 @@ func PlotResults(results []BenchmarkResult) {
 ```
 
 **Acceptance Criteria:**
+
 - System sustains ≥95% of target TPS for all test cases
 - Delay automatically scales proportionally to load
 - No crashes or memory leaks during 1M TPS test
@@ -847,15 +874,18 @@ func PlotResults(results []BenchmarkResult) {
 ## Metrics and Monitoring
 
 ### Key Metrics to Track
+
 - `tqdbproxy_write_batch_size`: Distribution of batch sizes
 - `tqdbproxy_write_batch_delay_seconds`: Batching window duration
 - `tqdbproxy_write_batch_latency_seconds`: Execution time
 - `tqdbproxy_write_ops_per_second`: Current write throughput
 - `tqdbproxy_write_current_delay_ms`: Current adaptive delay
 - `tqdbproxy_write_delay_adjustments_total`: Adjustment frequency
-- `tqdbproxy_write_excluded_total`: Writes excluded from batching (by reason: transaction, etc.)
+- `tqdbproxy_write_excluded_total`: Writes excluded from batching (by reason:
+  transaction, etc.)
 
 ### Alerting
+
 - High write batch failure rate
 - Excessive batch delays (> 10ms avg)
 - Adaptive delay stuck at max
@@ -872,27 +902,32 @@ func PlotResults(results []BenchmarkResult) {
 ## Risk Assessment
 
 ### High Risk
+
 - **Data Loss**: Incorrect batching could lose writes
   - Mitigation: Comprehensive testing, conservative defaults, opt-in
 - **Latency Impact**: Batching adds delay to writes
   - Mitigation: Adaptive delay, configurable parameters, monitoring
 
 ### Medium Risk
+
 - **Complexity**: New component increases system complexity
   - Mitigation: Clear documentation, gradual rollout
 - **Transaction Conflicts**: Batched writes in transaction may conflict
   - Mitigation: Fallback to individual execution, clear error messages
 
 ### Low Risk
+
 - **Memory Usage**: Buffering writes uses memory
   - Mitigation: Max batch size limit, monitoring
 
 ## Future Enhancements
 
-1. **Advanced Delay Scaling**: Machine learning-based delay prediction using historical patterns
+1. **Advanced Delay Scaling**: Machine learning-based delay prediction using
+   historical patterns
 2. **Smart Batching**: Analyze query patterns to optimize batching strategy
 3. **Cross-Location Batching**: Batch writes from different source locations
-4. **Write Coalescing**: Merge redundant writes (e.g., multiple updates to same row)
+4. **Write Coalescing**: Merge redundant writes (e.g., multiple updates to same
+   row)
 5. **Priority Queues**: High-priority writes bypass batching
 6. **Write-Read Consistency**: Coordinate with read cache invalidation
 7. **Multi-Database Batching**: Coordinate batching across sharded databases
@@ -902,4 +937,5 @@ func PlotResults(results []BenchmarkResult) {
 - Current cache implementation: [cache/cache.go](../../cache/cache.go)
 - Parser implementation: [parser/parser.go](../../parser/parser.go)
 - Metrics: [metrics/metrics.go](../../metrics/metrics.go)
-- Single-flight pattern: [docs/components/cache/README.md](../components/cache/README.md)
+- Single-flight pattern:
+  [docs/components/cache/README.md](../components/cache/README.md)

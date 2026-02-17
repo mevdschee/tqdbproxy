@@ -8,7 +8,8 @@
 
 ## Overview
 
-Create comprehensive benchmarks using pgx client to validate adaptive delay scaling at different load levels (1k, 10k, 100k, 1M TPS).
+Create comprehensive benchmarks using pgx client to validate adaptive delay
+scaling at different load levels (1k, 10k, 100k, 1M TPS).
 
 ## Prerequisites
 
@@ -569,4 +570,6 @@ Results: Actual TPS=850000, Avg Delay=87.3ms, Avg Batch=892.5
 ## Next Steps
 
 After completion, proceed to:
-- [07-testing-validation.md](07-testing-validation.md) - Comprehensive testing and validation
+
+- [07-testing-validation.md](07-testing-validation.md) - Comprehensive testing
+  and validation

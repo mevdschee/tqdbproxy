@@ -8,7 +8,8 @@
 
 ## Overview
 
-Integrate write batching into the MariaDB and PostgreSQL proxy handlers with transaction state tracking.
+Integrate write batching into the MariaDB and PostgreSQL proxy handlers with
+transaction state tracking.
 
 ## Prerequisites
 
@@ -31,7 +32,8 @@ Integrate write batching into the MariaDB and PostgreSQL proxy handlers with tra
 
 **Files**: `mariadb/mariadb.go`, `postgres/postgres.go`
 
-**Note**: Transaction state tracking is already implemented in the proxy. Verify the following exists:
+**Note**: Transaction state tracking is already implemented in the proxy. Verify
+the following exists:
 
 - [x] `inTransaction` field in connection state
 - [x] Tracking of BEGIN/START TRANSACTION
@@ -464,4 +466,6 @@ curl http://localhost:9090/metrics | grep write_excluded_total
 ## Next Steps
 
 After completion, proceed to:
-- [06-benchmark-suite.md](06-benchmark-suite.md) - Create comprehensive benchmarks
+
+- [06-benchmark-suite.md](06-benchmark-suite.md) - Create comprehensive
+  benchmarks

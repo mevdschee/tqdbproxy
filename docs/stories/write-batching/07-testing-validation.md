@@ -8,7 +8,8 @@
 
 ## Overview
 
-Comprehensive testing and validation of the complete write batching system including unit tests, integration tests, load tests, and edge case validation.
+Comprehensive testing and validation of the complete write batching system
+including unit tests, integration tests, load tests, and edge case validation.
 
 ## Prerequisites
 
@@ -384,47 +385,47 @@ name: Write Batch Tests
 on: [push, pull_request]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_PASSWORD: test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      
-      mariadb:
-        image: mariadb:10.11
-        env:
-          MYSQL_ROOT_PASSWORD: test
-    
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-      
-      - name: Unit Tests
-        run: |
-          go test ./parser -v -race -coverprofile=parser-coverage.out
-          go test ./writebatch -v -race -coverprofile=writebatch-coverage.out
-      
-      - name: Integration Tests
-        run: |
-          go test ./mariadb -v -race -coverprofile=mariadb-coverage.out
-          go test ./postgres -v -race -coverprofile=postgres-coverage.out
-      
-      - name: Coverage Report
-        run: |
-          go tool cover -func=parser-coverage.out
-          go tool cover -func=writebatch-coverage.out
+    test:
+        runs-on: ubuntu-latest
+
+        services:
+            postgres:
+                image: postgres:15
+                env:
+                    POSTGRES_PASSWORD: test
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+
+            mariadb:
+                image: mariadb:10.11
+                env:
+                    MYSQL_ROOT_PASSWORD: test
+
+        steps:
+            - uses: actions/checkout@v3
+
+            - name: Set up Go
+              uses: actions/setup-go@v4
+              with:
+                  go-version: "1.21"
+
+            - name: Unit Tests
+              run: |
+                  go test ./parser -v -race -coverprofile=parser-coverage.out
+                  go test ./writebatch -v -race -coverprofile=writebatch-coverage.out
+
+            - name: Integration Tests
+              run: |
+                  go test ./mariadb -v -race -coverprofile=mariadb-coverage.out
+                  go test ./postgres -v -race -coverprofile=postgres-coverage.out
+
+            - name: Coverage Report
+              run: |
+                  go tool cover -func=parser-coverage.out
+                  go tool cover -func=writebatch-coverage.out
 ```
 
 ## Validation Checklist
@@ -480,6 +481,7 @@ go test ./benchmarks/writebatch -bench=. -benchmem
 ## Next Steps
 
 After validation:
+
 - Update main story document with completion status
 - Create documentation for operations team
 - Plan production rollout strategy
