@@ -1,5 +1,11 @@
 package writebatch
 
+import (
+	"time"
+
+	"github.com/mevdschee/tqdbproxy/metrics"
+)
+
 // executeBatch executes a batch of write requests
 func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 	// Check if manager is closed
@@ -16,6 +22,7 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 	group.mu.Lock()
 	requests := group.Requests
 	batchSize := len(requests)
+	firstSeen := group.FirstSeen
 	group.Requests = nil
 	group.mu.Unlock()
 
@@ -26,14 +33,72 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 		return
 	}
 
+	// Record metrics
+	batchStart := time.Now()
+	if requests[0] != nil {
+		queryLabel := truncateQuery(requests[0].Query, 50)
+		metrics.WriteBatchSize.WithLabelValues(queryLabel).Observe(float64(batchSize))
+		metrics.WriteBatchDelay.WithLabelValues(queryLabel).Observe(time.Since(firstSeen).Seconds())
+	}
+
 	if batchSize == 1 {
 		m.executeSingle(requests[0])
 	} else {
 		m.executeBatchedWrites(requests)
 	}
 
+	// Record latency
+	if requests[0] != nil {
+		queryLabel := truncateQuery(requests[0].Query, 50)
+		metrics.WriteBatchLatency.WithLabelValues(queryLabel).Observe(time.Since(batchStart).Seconds())
+		metrics.WriteBatchedTotal.WithLabelValues(getQueryType(requests[0].Query)).Add(float64(batchSize))
+	}
+
 	// Update throughput metrics
 	m.updateThroughput(batchSize)
+}
+
+// truncateQuery truncates a query for use as a metric label
+func truncateQuery(query string, maxLen int) string {
+	if len(query) <= maxLen {
+		return query
+	}
+	return query[:maxLen] + "..."
+}
+
+// getQueryType extracts query type from query string
+func getQueryType(query string) string {
+	// Simple extraction - look for first SQL keyword
+	q := query
+	if len(q) > 20 {
+		q = q[:20]
+	}
+	q = " " + q + " "
+	if contains(q, " INSERT ") || contains(q, " insert ") {
+		return "INSERT"
+	}
+	if contains(q, " UPDATE ") || contains(q, " update ") {
+		return "UPDATE"
+	}
+	if contains(q, " DELETE ") || contains(q, " delete ") {
+		return "DELETE"
+	}
+	return "UNKNOWN"
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr ||
+		s[len(s)-len(substr):] == substr ||
+		indexOf(s, substr) >= 0))
+}
+
+func indexOf(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }
 
 // executeSingle executes a single write request

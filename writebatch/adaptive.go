@@ -3,6 +3,8 @@ package writebatch
 import (
 	"context"
 	"time"
+
+	"github.com/mevdschee/tqdbproxy/metrics"
 )
 
 // StartAdaptiveAdjustment runs the adaptive delay adjustment loop
@@ -25,6 +27,10 @@ func (m *Manager) adjustDelay() {
 	currentOps := m.opsPerSecond.Load()
 	currentDelay := m.currentDelay.Load()
 
+	// Update gauge metrics
+	metrics.WriteOpsPerSecond.Set(float64(currentOps))
+	metrics.WriteCurrentDelay.Set(float64(currentDelay) / 1000.0)
+
 	threshold := uint64(m.config.WriteThreshold)
 
 	if currentOps > threshold {
@@ -34,7 +40,10 @@ func (m *Manager) adjustDelay() {
 		if newDelay > maxDelay {
 			newDelay = maxDelay
 		}
-		m.currentDelay.Store(newDelay)
+		if newDelay != currentDelay {
+			m.currentDelay.Store(newDelay)
+			metrics.WriteDelayAdjustments.WithLabelValues("increase").Inc()
+		}
 	} else if currentOps < threshold/2 && currentOps > 0 {
 		// Low write rate - decrease delay for lower latency
 		newDelay := int64(float64(currentDelay) / m.config.AdaptiveStep)
@@ -42,7 +51,10 @@ func (m *Manager) adjustDelay() {
 		if newDelay < minDelay {
 			newDelay = minDelay
 		}
-		m.currentDelay.Store(newDelay)
+		if newDelay != currentDelay {
+			m.currentDelay.Store(newDelay)
+			metrics.WriteDelayAdjustments.WithLabelValues("decrease").Inc()
+		}
 	}
 	// If ops is between threshold/2 and threshold, keep current delay
 }
