@@ -56,9 +56,8 @@ func New(pcfg config.ProxyConfig, pools map[string]*replica.Pool, c *cache.Cache
 	// Initialize write batching if enabled (actual manager created in Start after db connection)
 	if pcfg.WriteBatch.Enabled {
 		p.wbCtx, p.wbCancel = context.WithCancel(context.Background())
-		log.Printf("[MariaDB] Write batching will be enabled (delay: %dms-%dms, batch size: %d, threshold: %d ops/s)",
-			pcfg.WriteBatch.MinDelayMs, pcfg.WriteBatch.MaxDelayMs,
-			pcfg.WriteBatch.MaxBatchSize, int(pcfg.WriteBatch.WriteThreshold))
+		log.Printf("[MariaDB] Write batching will be enabled (batch size: %d)",
+			pcfg.WriteBatch.MaxBatchSize)
 	}
 
 	return p
@@ -100,16 +99,9 @@ func (p *Proxy) Start() error {
 	// Initialize write batching if enabled
 	if p.config.WriteBatch.Enabled {
 		wbCfg := writebatch.Config{
-			InitialDelayMs:  p.config.WriteBatch.InitialDelayMs,
-			MaxDelayMs:      p.config.WriteBatch.MaxDelayMs,
-			MinDelayMs:      p.config.WriteBatch.MinDelayMs,
-			MaxBatchSize:    p.config.WriteBatch.MaxBatchSize,
-			WriteThreshold:  int(p.config.WriteBatch.WriteThreshold),
-			AdaptiveStep:    p.config.WriteBatch.AdaptiveStep,
-			MetricsInterval: p.config.WriteBatch.MetricsInterval,
+			MaxBatchSize: p.config.WriteBatch.MaxBatchSize,
 		}
 		p.writeBatch = writebatch.New(db, wbCfg)
-		p.writeBatch.StartAdaptiveAdjustment(p.wbCtx)
 		log.Printf("[MariaDB] Write batching started")
 	}
 
@@ -1473,13 +1465,14 @@ func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
 }
 
 func (c *clientConn) handleBatchedWrite(query string, start time.Time, file, lineStr, queryType string, moreResults bool) error {
-	// Parse the query to get the batch key
+	// Parse the query to get the batch key and batching hint
 	parsed := parser.Parse(query)
 	batchKey := parsed.GetBatchKey()
+	batchMs := parsed.BatchMs
 
 	// Enqueue the write (blocks until result is available)
 	ctx := context.Background()
-	result := c.proxy.writeBatch.Enqueue(ctx, batchKey, query, nil)
+	result := c.proxy.writeBatch.Enqueue(ctx, batchKey, query, nil, batchMs)
 
 	// Record metrics
 	metrics.QueryTotal.WithLabelValues(file, lineStr, queryType, "false").Inc()
