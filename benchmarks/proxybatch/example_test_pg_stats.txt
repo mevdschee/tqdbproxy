@@ -1,0 +1,42 @@
+=== PostgreSQL Stats - Wed Feb 18 01:24:02 PM CET 2026 ===
+
+--- Before Benchmark ---
+       metric        | value 
+---------------------+-------
+ Active Connections: |     1
+ Idle Connections:   |     0
+(2 rows)
+
+    metric     |   value   
+---------------+-----------
+ Commits       |  47288745
+ Rollbacks     |     21110
+ Blocks Read   |    131376
+ Blocks Hit    | 464617942
+ Rows Inserted | 106978987
+(5 rows)
+
+
+--- After Benchmark ---
+      metric       |   value   
+-------------------+-----------
+ Total Commits     |  47978237
+ Total Rollbacks   |     21110
+ Total Inserts     | 107666940
+ Cache Hit Ratio % |     99.97
+(4 rows)
+
+
+Table Stats:
+ relname | inserts | updates | deletes | live_rows | dead_rows 
+---------+---------+---------+---------+-----------+-----------
+ test    |  191880 |       0 |       0 |    191880 |         0
+(1 row)
+
+
+Lock Stats:
+      mode       | count 
+-----------------+-------
+ AccessShareLock |     1
+(1 row)
+

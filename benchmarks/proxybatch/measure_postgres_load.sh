@@ -7,8 +7,10 @@ set -e
 # Configuration
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5432}"
-PG_USER="${PG_USER:-postgres}"
+PG_USER="${PG_USER:-tqdbproxy}"
+PG_PASS="${PG_PASS:-tqdbproxy}"
 PG_DB="${PG_DB:-tqdbproxy}"
+export PGPASSWORD="$PG_PASS"
 RESULTS_DIR="postgres_load_results"
 DURATION=30  # seconds per test
 

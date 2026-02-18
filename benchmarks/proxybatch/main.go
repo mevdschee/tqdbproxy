@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"runtime/pprof"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,18 +141,9 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 			for time.Now().Before(endTime) {
 				reqStart := time.Now()
 
-				// Format query directly to avoid prepared statements
-				var formattedQuery string
-				if dbType == "postgres" {
-					formattedQuery = fmt.Sprintf(strings.Replace(insertQuery, "$1", "%d", 1), workerID)
-					formattedQuery = strings.Replace(formattedQuery, "$2", fmt.Sprintf("%d", time.Now().UnixNano()), 1)
-				} else {
-					formattedQuery = strings.Replace(insertQuery, "?", fmt.Sprintf("%d", workerID), 1)
-					formattedQuery = strings.Replace(formattedQuery, "?", fmt.Sprintf("%d", time.Now().UnixNano()), 1)
-				}
-
-				// Execute write directly to proxy (proxy handles batching via hint)
-				_, err := db.Exec(formattedQuery)
+				// Use parameterized queries to enable batching
+				// The proxy can batch identical queries with different parameters
+				_, err := db.Exec(insertQuery, workerID, time.Now().UnixNano())
 
 				if err == nil {
 					totalOps.Add(1)

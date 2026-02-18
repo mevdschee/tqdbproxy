@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/binary"
@@ -22,6 +23,7 @@ import (
 	"github.com/mevdschee/tqdbproxy/metrics"
 	"github.com/mevdschee/tqdbproxy/parser"
 	"github.com/mevdschee/tqdbproxy/replica"
+	"github.com/mevdschee/tqdbproxy/writebatch"
 
 	_ "github.com/lib/pq"
 )
@@ -67,10 +69,13 @@ func queryTypeLabel(t parser.QueryType) string {
 
 // Proxy handles PostgreSQL protocol connections with caching
 type Proxy struct {
-	config config.ProxyConfig
-	pools  map[string]*replica.Pool
-	cache  *cache.Cache
-	mu     sync.RWMutex
+	config     config.ProxyConfig
+	pools      map[string]*replica.Pool
+	cache      *cache.Cache
+	mu         sync.RWMutex
+	writeBatch *writebatch.Manager
+	wbCtx      context.Context
+	wbCancel   context.CancelFunc
 }
 
 // connState tracks per-connection state for TQDB status
@@ -87,15 +92,26 @@ type connState struct {
 	preparedStatements map[string]string        // statement name -> query SQL
 	boundParams        map[string][]interface{} // portal name -> parameters
 	portalStatements   map[string]string        // portal name -> statement name
+	writeBatch         *writebatch.Manager      // write batching manager for this connection
+	inTransaction      bool                     // track transaction state
 }
 
 // New creates a new PostgreSQL proxy
 func New(pcfg config.ProxyConfig, pools map[string]*replica.Pool, c *cache.Cache) *Proxy {
-	return &Proxy{
+	p := &Proxy{
 		config: pcfg,
 		pools:  pools,
 		cache:  c,
 	}
+
+	// Initialize write batching context if enabled
+	if pcfg.WriteBatch.Enabled {
+		p.wbCtx, p.wbCancel = context.WithCancel(context.Background())
+		log.Printf("[PostgreSQL] Write batching will be enabled (batch size: %d)",
+			pcfg.WriteBatch.MaxBatchSize)
+	}
+
+	return p
 }
 
 // UpdateConfig updates the proxy configuration and pools
@@ -231,6 +247,20 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	}
 	defer db.Close()
 
+	// Initialize write batching for this connection if enabled
+	var connWriteBatch *writebatch.Manager
+	if p.config.WriteBatch.Enabled && p.wbCtx != nil {
+		wbCfg := writebatch.Config{
+			MaxBatchSize: p.config.WriteBatch.MaxBatchSize,
+		}
+		connWriteBatch = writebatch.New(db, wbCfg)
+		defer func() {
+			if err := connWriteBatch.Close(); err != nil {
+				log.Printf("[PostgreSQL] Error closing writebatch manager: %v", err)
+			}
+		}()
+	}
+
 	if err := db.Ping(); err != nil {
 		log.Printf("[PostgreSQL] Backend ping error (conn %d): %v", connID, err)
 		// Strip "pq: " prefix from error message to match native PostgreSQL
@@ -272,6 +302,8 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 		preparedStatements: make(map[string]string),
 		boundParams:        make(map[string][]interface{}),
 		portalStatements:   make(map[string]string),
+		writeBatch:         connWriteBatch,
+		inTransaction:      false,
 	}
 	defer func() {
 		for _, rdb := range state.replicaDBs {
@@ -374,28 +406,34 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32, state
 		case msgQuery:
 			p.handleQuery(payload, client, db, state)
 		case msgParse:
+			log.Printf("[PostgreSQL] Parse message received (conn %d)", connID)
 			if err := p.handleParse(payload, client, state); err != nil {
 				log.Printf("[PostgreSQL] Parse error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 				p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 			}
 		case msgBind:
+			log.Printf("[PostgreSQL] Bind message received (conn %d)", connID)
 			if err := p.handleBind(payload, client, state); err != nil {
 				log.Printf("[PostgreSQL] Bind error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 				p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 			}
 		case msgDescribe:
+			log.Printf("[PostgreSQL] Describe message received (conn %d)", connID)
 			// Send NoData (we don't fully support describe yet)
 			p.writeMessage(client, msgNoData, []byte{})
 		case msgExecute:
+			log.Printf("[PostgreSQL] Execute message received (conn %d)", connID)
 			if err := p.handleExecute(payload, client, db, connID, state); err != nil {
 				log.Printf("[PostgreSQL] Execute error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 			}
 		case 'C': // Close
+			log.Printf("[PostgreSQL] Close message received (conn %d)", connID)
 			p.handleClose(payload, client, state)
 		case msgSync:
+			log.Printf("[PostgreSQL] Sync message received (conn %d)", connID)
 			// Send ReadyForQuery
 			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		case msgTerminate:
@@ -418,11 +456,20 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 	}
 	query := string(queryBytes)
 
+	log.Printf("[PostgreSQL] handleQuery called, query=%q", query[:min(len(query), 100)])
+
 	// Check for TQDB status query (PostgreSQL style: pg_tqdb_status)
 	queryUpper := strings.ToUpper(strings.TrimSpace(query))
 	if strings.Contains(queryUpper, "PG_TQDB_STATUS") {
 		p.handleShowTQDBStatus(client, state)
 		return
+	}
+
+	// Track transaction state
+	if queryUpper == "BEGIN" || strings.HasPrefix(queryUpper, "BEGIN ") || queryUpper == "START TRANSACTION" {
+		state.inTransaction = true
+	} else if queryUpper == "COMMIT" || queryUpper == "ROLLBACK" {
+		state.inTransaction = false
 	}
 
 	parsed := parser.Parse(query)
@@ -739,6 +786,8 @@ func (p *Proxy) handleParse(payload []byte, client net.Conn, state *connState) e
 	}
 	query := string(payload[queryStart : queryStart+queryEnd])
 
+	log.Printf("[PostgreSQL] handleParse: stmtName=%q, query=%q", stmtName, query)
+
 	// Store the prepared statement
 	state.preparedStatements[stmtName] = query
 
@@ -824,12 +873,16 @@ func (p *Proxy) handleBind(payload []byte, client net.Conn, state *connState) er
 func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connID uint32, state *connState) error {
 	start := time.Now()
 
+	log.Printf("[PostgreSQL] handleExecute called")
+
 	// Extract portal name (null-terminated)
 	portalNameEnd := bytes.IndexByte(payload, 0)
 	if portalNameEnd < 0 {
 		return fmt.Errorf("malformed Execute message: no portal name terminator")
 	}
 	portalName := string(payload[:portalNameEnd])
+
+	log.Printf("[PostgreSQL] Execute portal=%q", portalName)
 
 	// Get bound parameters
 	params, ok := state.boundParams[portalName]
@@ -853,6 +906,9 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 
 	// Parse the query
 	parsed := parser.Parse(query)
+
+	// DEBUG: Log query details
+	log.Printf("[PostgreSQL] Execute: original query=%q, parsed query=%q, num params=%d", query, parsed.Query, len(params))
 
 	file := parsed.File
 	if file == "" {
@@ -904,6 +960,48 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 			}
 		}
 		metrics.CacheMisses.WithLabelValues(file, line).Inc()
+	}
+
+	// Check if write batching should be used
+	if state.writeBatch != nil && !state.inTransaction && parsed.IsWritable() && parsed.IsBatchable() {
+		// Use write batching
+		batchKey := parsed.GetBatchKey()
+		batchMs := parsed.BatchMs
+
+		log.Printf("[PostgreSQL] Batching write: key=%q, batchMs=%d", batchKey, batchMs)
+
+		// Enqueue the write (blocks until result is available)
+		ctx := context.Background()
+		result := state.writeBatch.Enqueue(ctx, batchKey, parsed.Query, params, batchMs)
+
+		// Update metrics
+		metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
+		metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+		if result.Error != nil {
+			// Handle batching-specific errors
+			if result.Error == writebatch.ErrManagerClosed || result.Error == writebatch.ErrTimeout {
+				log.Printf("[PostgreSQL] Batching unavailable, falling back to direct execution")
+				// Fall through to direct execution
+			} else {
+				return result.Error
+			}
+		} else {
+			// Success - send result to client
+			var response bytes.Buffer
+
+			// For non-SELECT queries, send CommandComplete
+			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 %d", result.AffectedRows)), 0)
+			response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+
+			// Send response to client
+			if _, err := client.Write(response.Bytes()); err != nil {
+				log.Printf("[PostgreSQL] Client write error: %v", err)
+				return err
+			}
+
+			return nil
+		}
 	}
 
 	// Execute the query with parameters
