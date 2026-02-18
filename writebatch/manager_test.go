@@ -36,7 +36,7 @@ func TestManager_SingleWrite(t *testing.T) {
 	defer m.Close()
 
 	ctx := context.Background()
-	result := m.Enqueue(ctx, "test:1", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"test"}, 0)
+	result := m.Enqueue(ctx, "test:1", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"test"}, 0, nil)
 
 	if result.Error != nil {
 		t.Fatalf("Expected no error, got %v", result.Error)
@@ -69,7 +69,7 @@ func TestManager_BatchIdenticalQueries(t *testing.T) {
 		go func(n int) {
 			result := m.Enqueue(ctx, "test:batch",
 				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-				[]interface{}{"batch", n}, 10)
+				[]interface{}{"batch", n}, 10, nil)
 			results <- result
 		}(i)
 	}
@@ -107,7 +107,7 @@ func TestManager_BatchMixedQueries(t *testing.T) {
 	go func() {
 		result := m.Enqueue(ctx, "test:mixed",
 			"INSERT INTO test_writes (data) VALUES (?)",
-			[]interface{}{"insert"}, 10)
+			[]interface{}{"insert"}, 10, nil)
 		results <- result
 	}()
 
@@ -115,7 +115,7 @@ func TestManager_BatchMixedQueries(t *testing.T) {
 		// Different query - should trigger transaction batch
 		result := m.Enqueue(ctx, "test:mixed",
 			"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-			[]interface{}{"insert2", 42}, 10)
+			[]interface{}{"insert2", 42}, 10, nil)
 		results <- result
 	}()
 
@@ -152,7 +152,7 @@ func TestManager_BatchSizeLimit(t *testing.T) {
 		go func(n int) {
 			result := m.Enqueue(ctx, "test:limit",
 				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-				[]interface{}{"batch", n}, 100)
+				[]interface{}{"batch", n}, 100, nil)
 			results <- result
 		}(i)
 	}
@@ -185,7 +185,7 @@ func TestManager_DelayTiming(t *testing.T) {
 
 	result := m.Enqueue(ctx, "test:timing",
 		"INSERT INTO test_writes (data) VALUES (?)",
-		[]interface{}{"timing"}, 50)
+		[]interface{}{"timing"}, 50, nil)
 
 	elapsed := time.Since(start)
 
@@ -224,7 +224,7 @@ func TestManager_ConcurrentEnqueues(t *testing.T) {
 			defer wg.Done()
 			result := m.Enqueue(ctx, "test:concurrent",
 				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-				[]interface{}{"concurrent", n}, 5)
+				[]interface{}{"concurrent", n}, 5, nil)
 			if result.Error != nil {
 				errors <- result.Error
 			}
@@ -261,7 +261,7 @@ func TestManager_ContextCancellation(t *testing.T) {
 
 	result := m.Enqueue(ctx, "test:cancel",
 		"INSERT INTO test_writes (data) VALUES (?)",
-		[]interface{}{"cancelled"}, 100)
+		[]interface{}{"cancelled"}, 100, nil)
 
 	if result.Error == nil {
 		t.Error("Expected context cancellation error, got nil")
@@ -283,7 +283,7 @@ func TestManager_Close(t *testing.T) {
 	ctx := context.Background()
 	result := m.Enqueue(ctx, "test:closed",
 		"INSERT INTO test_writes (data) VALUES (?)",
-		[]interface{}{"closed"}, 0)
+		[]interface{}{"closed"}, 0, nil)
 
 	if result.Error != ErrManagerClosed {
 		t.Errorf("Expected ErrManagerClosed, got %v", result.Error)
@@ -302,7 +302,7 @@ func TestManager_ErrorHandling(t *testing.T) {
 	// Try to insert into non-existent table
 	result := m.Enqueue(ctx, "test:error",
 		"INSERT INTO nonexistent (data) VALUES (?)",
-		[]interface{}{"error"}, 0)
+		[]interface{}{"error"}, 0, nil)
 
 	if result.Error == nil {
 		t.Error("Expected error for invalid query, got nil")
@@ -322,7 +322,7 @@ func BenchmarkManager_SingleWrite(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m.Enqueue(ctx, "bench:single", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 0)
+		m.Enqueue(ctx, "bench:single", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 0, nil)
 	}
 }
 
@@ -340,7 +340,7 @@ func BenchmarkManager_BatchedWrites(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			m.Enqueue(ctx, "bench:batch", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 1)
+			m.Enqueue(ctx, "bench:batch", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 1, nil)
 		}
 	})
 }
