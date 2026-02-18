@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,8 @@ func New(db *sql.DB, config Config) *Manager {
 // Enqueue adds a write operation to the batch queue and waits for its result
 // batchMs is the maximum wait time in milliseconds (0 = execute immediately)
 func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int, onBatchComplete func(int)) WriteResult {
-	log.Printf("[WriteBatch] Enqueue called: query=%q, numParams=%d, batchMs=%d", query, len(params), batchMs)
+	hasReturning := hasReturningClause(query)
+	log.Printf("[WriteBatch] Enqueue called: query=%q, numParams=%d, batchMs=%d, hasReturning=%v", query, len(params), batchMs, hasReturning)
 
 	if m.closed.Load() {
 		return WriteResult{Error: ErrManagerClosed}
@@ -51,6 +53,7 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 		ResultChan:      make(chan WriteResult, 1),
 		EnqueuedAt:      time.Now(),
 		OnBatchComplete: onBatchComplete,
+		HasReturning:    hasReturning,
 	}
 
 	// Get or create batch group
@@ -133,4 +136,11 @@ func (m *Manager) Close() error {
 	// Wait a moment for in-flight batches to complete
 	time.Sleep(200 * time.Millisecond)
 	return nil
+}
+
+// hasReturningClause checks if a query contains a RETURNING clause
+func hasReturningClause(query string) bool {
+	// Simple case-insensitive check for RETURNING keyword
+	q := strings.ToUpper(query)
+	return strings.Contains(q, " RETURNING ")
 }

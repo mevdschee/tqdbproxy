@@ -12,14 +12,16 @@ type WriteRequest struct {
 	ResultChan      chan WriteResult
 	EnqueuedAt      time.Time
 	OnBatchComplete func(batchSize int) // Called when batch executes to update connection state
+	HasReturning    bool                // True if query has RETURNING clause
 }
 
 // WriteResult contains the result of a write operation
 type WriteResult struct {
-	AffectedRows int64
-	LastInsertID int64
-	BatchSize    int // Number of operations in the batch that executed this request
-	Error        error
+	AffectedRows    int64
+	LastInsertID    int64
+	BatchSize       int           // Number of operations in the batch that executed this request
+	ReturningValues []interface{} // Values returned by RETURNING clause
+	Error           error
 }
 
 // BatchGroup holds a group of write requests with the same batch key

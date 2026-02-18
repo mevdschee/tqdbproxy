@@ -851,9 +851,39 @@ func (p *Proxy) handleDescribe(payload []byte, client net.Conn, state *connState
 			return err
 		}
 
-		// For non-SELECT queries (INSERT, UPDATE, DELETE), send NoData
-		// For SELECT queries, we'd need to send RowDescription
-		// For simplicity, always send NoData for now
+		// Check if query has RETURNING clause
+		queryUpper := strings.ToUpper(query)
+		if strings.Contains(queryUpper, " RETURNING ") {
+			// For RETURNING queries, send RowDescription
+			// Parse RETURNING column names
+			returningIdx := strings.Index(queryUpper, " RETURNING ")
+			if returningIdx != -1 {
+				returningClause := query[returningIdx+11:] // Skip " RETURNING "
+				// Simple column name extraction (assumes single column)
+				colName := strings.TrimSpace(returningClause)
+				if idx := strings.IndexAny(colName, " ,;"); idx != -1 {
+					colName = colName[:idx]
+				}
+				
+				// Build minimal RowDescription for single column
+				// Format: int16 (num fields) + field descriptions
+				// Field: name\0 + tableOID(4) + colNum(2) + typeOID(4) + typeSize(2) + typeMod(4) + formatCode(2)
+				var rowDesc bytes.Buffer
+				binary.Write(&rowDesc, binary.BigEndian, uint16(1)) // 1 column
+				rowDesc.WriteString(colName)
+				rowDesc.WriteByte(0) // null terminator
+				binary.Write(&rowDesc, binary.BigEndian, uint32(0))  // table OID
+				binary.Write(&rowDesc, binary.BigEndian, uint16(0))  // column number
+				binary.Write(&rowDesc, binary.BigEndian, uint32(23)) // type OID (23 = int4)
+				binary.Write(&rowDesc, binary.BigEndian, int16(4))   // type size
+				binary.Write(&rowDesc, binary.BigEndian, int32(-1))  // type modifier
+				binary.Write(&rowDesc, binary.BigEndian, uint16(0))  // format code (text)
+				
+				return p.writeMessage(client, msgRowDescription, rowDesc.Bytes())
+			}
+		}
+
+		// For non-SELECT and non-RETURNING queries, send NoData
 		return p.writeMessage(client, msgNoData, []byte{})
 	} else if descType == 'P' {
 		// Describe Portal - we just send NoData for non-SELECT portals
@@ -1077,9 +1107,24 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 		// Success - send result to client
 		var response bytes.Buffer
 
-		// For non-SELECT queries, send CommandComplete
-		cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 %d", result.AffectedRows)), 0)
-		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+		// Check if query has RETURNING clause
+		if len(result.ReturningValues) > 0 {
+			// RETURNING query - send row data
+			// In extended query protocol (Execute message), client already has
+			// RowDescription from Describe, so we only send DataRow
+
+			// Send the returned value as a DataRow
+			dataRow := p.buildDataRow(result.ReturningValues)
+			response.Write(dataRow)
+
+			// Send CommandComplete with row count
+			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 1")), 0)
+			response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+		} else {
+			// Non-RETURNING query - send CommandComplete
+			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 %d", result.AffectedRows)), 0)
+			response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+		}
 
 		// Send response to client
 		if _, err := client.Write(response.Bytes()); err != nil {

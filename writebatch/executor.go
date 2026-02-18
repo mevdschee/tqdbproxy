@@ -134,9 +134,10 @@ func (m *Manager) executeBatchedWrites(requests []*WriteRequest) {
 // wrapped in a single transaction for better performance (single commit)
 func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 	firstQuery := requests[0].Query
+	hasReturning := requests[0].HasReturning
 
-	log.Printf("[WriteBatch] executePreparedBatch: query=%q, numRequests=%d, firstParams=%v",
-		firstQuery, len(requests), requests[0].Params)
+	log.Printf("[WriteBatch] executePreparedBatch: query=%q, numRequests=%d, firstParams=%v, hasReturning=%v",
+		firstQuery, len(requests), requests[0].Params, hasReturning)
 
 	// Start a transaction for the batch
 	tx, err := m.db.Begin()
@@ -164,19 +165,35 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 	hasError := false
 
 	for i, req := range requests {
-		result, err := stmt.Exec(req.Params...)
-		if err != nil {
-			results[i] = WriteResult{Error: err}
-			hasError = true
-			continue
-		}
+		if hasReturning {
+			// For RETURNING queries, use QueryRow to capture the returned value
+			var returnedValue interface{}
+			err := stmt.QueryRow(req.Params...).Scan(&returnedValue)
+			if err != nil {
+				results[i] = WriteResult{Error: err}
+				hasError = true
+				continue
+			}
+			results[i] = WriteResult{
+				AffectedRows:    1,
+				ReturningValues: []interface{}{returnedValue},
+				BatchSize:       len(requests),
+			}
+		} else {
+			result, err := stmt.Exec(req.Params...)
+			if err != nil {
+				results[i] = WriteResult{Error: err}
+				hasError = true
+				continue
+			}
 
-		affected, _ := result.RowsAffected()
-		lastID, _ := result.LastInsertId()
-		results[i] = WriteResult{
-			AffectedRows: affected,
-			LastInsertID: lastID,
-			BatchSize:    len(requests),
+			affected, _ := result.RowsAffected()
+			lastID, _ := result.LastInsertId()
+			results[i] = WriteResult{
+				AffectedRows: affected,
+				LastInsertID: lastID,
+				BatchSize:    len(requests),
+			}
 		}
 	}
 
