@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -31,10 +32,11 @@ func main() {
 	// Initialize metrics
 	metrics.Init()
 
-	// Start metrics HTTP server
+	// Start metrics HTTP server with pprof
 	go func() {
 		http.Handle("/metrics", metrics.Handler())
 		log.Printf("Metrics endpoint at http://localhost%s/metrics", *metricsAddr)
+		log.Printf("Pprof endpoints at http://localhost%s/debug/pprof/", *metricsAddr)
 		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
 			log.Printf("Metrics server error: %v", err)
 		}

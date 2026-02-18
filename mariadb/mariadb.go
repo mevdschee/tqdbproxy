@@ -652,6 +652,11 @@ func (c *clientConn) handleSingleQuery(query string, originalParsed *parser.Pars
 				return err
 			}
 			c.db = dbName
+			// Execute USE on backend
+			_, err := c.execBackendQuery(fmt.Sprintf("USE `%s`", dbName))
+			if err != nil {
+				return err
+			}
 			return c.writeOKWithInfo("", moreResults)
 		}
 	}

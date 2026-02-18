@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,19 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 		log.Fatal(err)
 	}
 	defer db.Close()
+
+	// Configure connection pool based on expected load
+	if targetOpsPerSec <= 10_000 {
+		db.SetMaxOpenConns(50)
+		db.SetMaxIdleConns(10)
+	} else if targetOpsPerSec <= 100_000 {
+		db.SetMaxOpenConns(200)
+		db.SetMaxIdleConns(50)
+	} else {
+		db.SetMaxOpenConns(500)
+		db.SetMaxIdleConns(100)
+	}
+	db.SetConnMaxLifetime(30 * time.Second)
 
 	// Test connection
 	if err := db.Ping(); err != nil {
@@ -120,6 +134,11 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 		go func(workerID int) {
 			defer wg.Done()
 
+			// Add small jitter to prevent thundering herd at start
+			time.Sleep(time.Duration(workerID) * time.Microsecond)
+
+			var errorCount int64
+
 			for time.Now().Before(endTime) {
 				reqStart := time.Now()
 
@@ -139,9 +158,12 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 				if err == nil {
 					totalOps.Add(1)
 					totalLatencyNs.Add(time.Since(reqStart).Nanoseconds())
-				} else if totalOps.Load() < 5 {
-					// Log first few errors to help diagnose issues
-					log.Printf("Worker %d error: %v", workerID, err)
+				} else {
+					errorCount++
+					if errorCount <= 3 {
+						// Log first few errors per worker to help diagnose issues
+						log.Printf("Worker %d error: %v", workerID, err)
+					}
 				}
 			}
 		}(i)
@@ -230,6 +252,18 @@ func main() {
 	log.Println("Testing batching hint performance via proxy (3s each)")
 	log.Println()
 
+	// Start CPU profiling
+	cpuFile, err := os.Create("cpu.prof")
+	if err != nil {
+		log.Fatal("Could not create CPU profile: ", err)
+	}
+	defer cpuFile.Close()
+	if err := pprof.StartCPUProfile(cpuFile); err != nil {
+		log.Fatal("Could not start CPU profile: ", err)
+	}
+	defer pprof.StopCPUProfile()
+	log.Println("CPU profiling enabled -> cpu.prof")
+
 	// Test rates with different batching hints
 	targets := []int{1_000, 10_000, 100_000, 1_000_000}
 	duration := 3 * time.Second
@@ -277,4 +311,21 @@ func main() {
 	log.Println("\nTo generate graph, run:")
 	log.Println("  gnuplot plot_bars.gnu")
 	log.Println("  (creates proxybatch_performance.png)")
+
+	// Write memory profile
+	memFile, err := os.Create("mem.prof")
+	if err != nil {
+		log.Printf("Could not create memory profile: %v", err)
+	} else {
+		defer memFile.Close()
+		if err := pprof.WriteHeapProfile(memFile); err != nil {
+			log.Printf("Could not write memory profile: %v", err)
+		} else {
+			log.Println("\nMemory profile written -> mem.prof")
+		}
+	}
+
+	log.Println("\nTo analyze profiles:")
+	log.Println("  go tool pprof cpu.prof")
+	log.Println("  go tool pprof mem.prof")
 }
