@@ -234,8 +234,8 @@ func TestBatchSizeWithMultipleBatches(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Set max connections to 1 to ensure we use the same connection
-	db.SetMaxOpenConns(1)
+	// Set max connections to allow concurrent execution within batch windows
+	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(1)
 
 	// Create test table
@@ -250,11 +250,26 @@ func TestBatchSizeWithMultipleBatches(t *testing.T) {
 	}
 	defer db.Exec("DROP TABLE IF EXISTS batch_test")
 
-	// Execute first batch with batch:100 hint (100ms window)
+	// Prepare statement with batch:100 hint (100ms window)
+	stmt, err := db.Prepare("/* batch:100 */ INSERT INTO batch_test (value) VALUES ($1)")
+	if err != nil {
+		t.Fatalf("Failed to prepare statement: %v", err)
+	}
+	defer stmt.Close()
+
+	// Execute first batch - launch queries concurrently within the batch window
 	firstBatchSize := 5
+	errChan := make(chan error, firstBatchSize)
 	for i := 0; i < firstBatchSize; i++ {
-		_, err := db.Exec(fmt.Sprintf("/* batch:100 */ INSERT INTO batch_test (value) VALUES (%d)", i))
-		if err != nil {
+		go func(val int) {
+			_, err := stmt.Exec(val)
+			errChan <- err
+		}(i)
+	}
+
+	// Wait for first batch to complete
+	for i := 0; i < firstBatchSize; i++ {
+		if err := <-errChan; err != nil {
 			t.Fatalf("Failed to execute query %d: %v", i, err)
 		}
 	}
@@ -285,11 +300,19 @@ func TestBatchSizeWithMultipleBatches(t *testing.T) {
 		t.Errorf("First batch: expected size %d, got %d", firstBatchSize, firstReportedSize)
 	}
 
-	// Execute second batch with different size
+	// Execute second batch with different size - launch concurrently
 	secondBatchSize := 8
+	errChan2 := make(chan error, secondBatchSize)
 	for i := 0; i < secondBatchSize; i++ {
-		_, err := db.Exec(fmt.Sprintf("/* batch:100 */ INSERT INTO batch_test (value) VALUES (%d)", i+100))
-		if err != nil {
+		go func(val int) {
+			_, err := stmt.Exec(val + 100)
+			errChan2 <- err
+		}(i)
+	}
+
+	// Wait for second batch to complete
+	for i := 0; i < secondBatchSize; i++ {
+		if err := <-errChan2; err != nil {
 			t.Fatalf("Failed to execute query %d in second batch: %v", i, err)
 		}
 	}

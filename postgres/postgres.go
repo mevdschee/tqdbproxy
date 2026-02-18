@@ -551,6 +551,75 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 		// We need to fetch from DB (either first request or waited but still miss)
 	}
 
+	// Check if write batching should be used
+	if state.writeBatch != nil && !state.inTransaction && parsed.IsWritable() && parsed.IsBatchable() {
+		// Use write batching
+		batchKey := parsed.GetBatchKey()
+		batchMs := parsed.BatchMs
+
+		log.Printf("[PostgreSQL] WRITEBATCH ROUTE (Query): query=%q, batchKey=%q, batchMs=%d",
+			query, batchKey, batchMs)
+
+		// Enqueue the write (blocks until result is available)
+		ctx := context.Background()
+		result := state.writeBatch.Enqueue(ctx, batchKey, parsed.Query, []interface{}{}, batchMs, func(batchSize int) {
+			// Update this connection's batch size when batch completes
+			state.lastBatchSize = batchSize
+		})
+
+		// Update metrics
+		metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
+		metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+		if result.Error != nil {
+			p.sendError(client, "42000", result.Error.Error())
+			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
+			return
+		}
+
+		// Track backend and batch size
+		state.lastBackend = "write-batch"
+		state.lastCacheHit = false
+		state.lastBatchSize = result.BatchSize
+
+		// Success - send result to client
+		var response bytes.Buffer
+
+		// Check if query has RETURNING clause
+		if len(result.ReturningValues) > 0 {
+			// RETURNING query - send row data
+			cols := []string{"id"} // TODO: extract column name from query
+			rowDesc := p.buildRowDescription(cols)
+			response.Write(rowDesc)
+
+			// Send the returned value as a DataRow
+			textValues := make([]interface{}, len(result.ReturningValues))
+			for i, v := range result.ReturningValues {
+				textValues[i] = fmt.Sprintf("%v", v)
+			}
+			dataRow := p.buildDataRow(textValues)
+			response.Write(dataRow)
+
+			// Send CommandComplete with row count
+			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 1")), 0)
+			response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+		} else {
+			// Non-RETURNING query - send CommandComplete
+			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 %d", result.AffectedRows)), 0)
+			response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+		}
+
+		// Send ReadyForQuery
+		response.Write(p.encodeMessage(msgReadyForQuery, []byte{'I'}))
+
+		// Send response to client
+		if _, err := client.Write(response.Bytes()); err != nil {
+			log.Printf("[PostgreSQL] Client write error: %v", err)
+		}
+
+		return
+	}
+
 	// Execute query
 	var response bytes.Buffer
 
@@ -864,21 +933,21 @@ func (p *Proxy) handleDescribe(payload []byte, client net.Conn, state *connState
 				if idx := strings.IndexAny(colName, " ,;"); idx != -1 {
 					colName = colName[:idx]
 				}
-				
+
 				// Build minimal RowDescription for single column
 				// Format: int16 (num fields) + field descriptions
 				// Field: name\0 + tableOID(4) + colNum(2) + typeOID(4) + typeSize(2) + typeMod(4) + formatCode(2)
 				var rowDesc bytes.Buffer
 				binary.Write(&rowDesc, binary.BigEndian, uint16(1)) // 1 column
 				rowDesc.WriteString(colName)
-				rowDesc.WriteByte(0) // null terminator
+				rowDesc.WriteByte(0)                                 // null terminator
 				binary.Write(&rowDesc, binary.BigEndian, uint32(0))  // table OID
 				binary.Write(&rowDesc, binary.BigEndian, uint16(0))  // column number
 				binary.Write(&rowDesc, binary.BigEndian, uint32(23)) // type OID (23 = int4)
 				binary.Write(&rowDesc, binary.BigEndian, int16(4))   // type size
 				binary.Write(&rowDesc, binary.BigEndian, int32(-1))  // type modifier
 				binary.Write(&rowDesc, binary.BigEndian, uint16(0))  // format code (text)
-				
+
 				return p.writeMessage(client, msgRowDescription, rowDesc.Bytes())
 			}
 		}
@@ -1109,13 +1178,39 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 
 		// Check if query has RETURNING clause
 		if len(result.ReturningValues) > 0 {
-			// RETURNING query - send row data
+			// RETURNING query - send row data in binary format
 			// In extended query protocol (Execute message), client already has
 			// RowDescription from Describe, so we only send DataRow
 
-			// Send the returned value as a DataRow
-			dataRow := p.buildDataRow(result.ReturningValues)
-			response.Write(dataRow)
+			// Encode the returned value in binary format (int32)
+			// DataRow: int16 (num cols) + [int32 (len) + bytes (data)]
+			var dataRow bytes.Buffer
+			binary.Write(&dataRow, binary.BigEndian, uint16(1)) // 1 column
+
+			// Encode the integer value in binary format (4 bytes for int32)
+			val := result.ReturningValues[0]
+			var valInt32 int32
+			switch v := val.(type) {
+			case int64:
+				valInt32 = int32(v)
+			case int32:
+				valInt32 = v
+			case int:
+				valInt32 = int32(v)
+			default:
+				// Fallback: try to parse as string
+				str := fmt.Sprintf("%v", v)
+				if i, err := strconv.ParseInt(str, 10, 32); err == nil {
+					valInt32 = int32(i)
+				}
+			}
+
+			// Write length (4 bytes) and value in binary format
+			binary.Write(&dataRow, binary.BigEndian, int32(4)) // length of int32
+			binary.Write(&dataRow, binary.BigEndian, valInt32) // the actual value
+
+			log.Printf("[PostgreSQL] Sending binary DataRow for RETURNING: value=%d", valInt32)
+			response.Write(p.encodeMessage(msgDataRow, dataRow.Bytes()))
 
 			// Send CommandComplete with row count
 			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 1")), 0)
