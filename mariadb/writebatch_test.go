@@ -1,7 +1,6 @@
 package mariadb
 
 import (
-	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -27,14 +26,8 @@ func TestWriteBatchIntegration(t *testing.T) {
 			},
 		},
 		WriteBatch: config.WriteBatchConfig{
-			Enabled:         true,
-			InitialDelayMs:  5,
-			MaxDelayMs:      50,
-			MinDelayMs:      1,
-			MaxBatchSize:    100,
-			WriteThreshold:  500.0,
-			AdaptiveStep:    1.5,
-			MetricsInterval: 1,
+			Enabled:      true,
+			MaxBatchSize: 100,
 		},
 	}
 
@@ -208,14 +201,8 @@ func TestWriteBatchManagerLifecycle(t *testing.T) {
 			"main": {Primary: "127.0.0.1:3306"},
 		},
 		WriteBatch: config.WriteBatchConfig{
-			Enabled:         true,
-			InitialDelayMs:  10,
-			MaxDelayMs:      100,
-			MinDelayMs:      1,
-			MaxBatchSize:    1000,
-			WriteThreshold:  1000.0,
-			AdaptiveStep:    1.5,
-			MetricsInterval: 1, // Must be > 0
+			Enabled:      true,
+			MaxBatchSize: 1000,
 		},
 	}
 
@@ -274,23 +261,14 @@ func TestBatchKeyGrouping(t *testing.T) {
 	// should be grouped into a single batch
 }
 
-// Test adaptive delay adjustment
-func TestWriteBatchAdaptiveDelay(t *testing.T) {
-	// Test that the adaptive delay system adjusts based on write throughput
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// Test batching configuration
+func TestWriteBatchConfig(t *testing.T) {
+	// Test that the batching config is correctly set
 
 	pcfg := config.ProxyConfig{
 		WriteBatch: config.WriteBatchConfig{
-			Enabled:         true,
-			InitialDelayMs:  10,
-			MaxDelayMs:      100,
-			MinDelayMs:      1,
-			MaxBatchSize:    1000,
-			WriteThreshold:  100.0, // Low threshold to test adjustment
-			AdaptiveStep:    2.0,
-			MetricsInterval: 1,
+			Enabled:      true,
+			MaxBatchSize: 1000,
 		},
 	}
 
@@ -299,12 +277,7 @@ func TestWriteBatchAdaptiveDelay(t *testing.T) {
 		t.Error("WriteBatch should be enabled")
 	}
 
-	if pcfg.WriteBatch.WriteThreshold != 100.0 {
-		t.Errorf("Expected threshold 100.0, got %f", pcfg.WriteBatch.WriteThreshold)
+	if pcfg.WriteBatch.MaxBatchSize != 1000 {
+		t.Errorf("Expected MaxBatchSize 1000, got %d", pcfg.WriteBatch.MaxBatchSize)
 	}
-
-	// The actual adaptive adjustment is tested in writebatch/adaptive_test.go
-	// This test just verifies the config flows through correctly
-
-	_ = ctx // Use ctx to avoid unused variable
 }

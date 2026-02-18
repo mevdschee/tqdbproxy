@@ -17,6 +17,7 @@ import (
 
 type BenchmarkResult struct {
 	TargetOpsPerSec int
+	BatchMs         int
 	ActualOpsPerSec float64
 	AvgLatencyMs    float64
 	TotalOps        int64
@@ -134,6 +135,7 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 
 	return BenchmarkResult{
 		TargetOpsPerSec: targetOpsPerSec,
+		BatchMs:         batchMs,
 		ActualOpsPerSec: avgOpsPerSec,
 		AvgLatencyMs:    avgLatencyMs,
 		TotalOps:        total,
@@ -149,10 +151,10 @@ func generateBarChart(results []BenchmarkResult, dbType string) {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "# Target(k) Throughput(k) Latency(ms)\n")
+	fmt.Fprintf(f, "# BatchHint Throughput(k) Latency(ms)\n")
 	for _, r := range results {
-		fmt.Fprintf(f, "%d %.1f %.2f\n",
-			r.TargetOpsPerSec/1000,
+		fmt.Fprintf(f, "batch:%d %.1f %.2f\n",
+			r.BatchMs,
 			r.ActualOpsPerSec/1000,
 			r.AvgLatencyMs)
 	}
@@ -168,7 +170,7 @@ set multiplot layout 1,2 title "Hint-Based Write Batching Performance (3s tests,
 
 # Left plot - PostgreSQL
 set title "PostgreSQL"
-set xlabel "Batching Configuration"
+set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k ops/sec)" textcolor rgb "blue"
 set y2label "Latency (ms)" textcolor rgb "red"
 set ytics nomirror
@@ -185,7 +187,7 @@ plot 'bars_postgres.dat' using 2:xtic(1) title 'Throughput' axes x1y1 linecolor 
 # Right plot - MariaDB
 unset title
 set title "MariaDB"
-set xlabel "Batching Configuration"
+set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k ops/sec)" textcolor rgb "blue"
 set y2label "Latency (ms)" textcolor rgb "red"
 

@@ -6,7 +6,7 @@ set multiplot layout 1,2 title "Hint-Based Write Batching Performance (3s tests,
 
 # Left plot - PostgreSQL
 set title "PostgreSQL"
-set xlabel "Batching Configuration"
+set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k ops/sec)" textcolor rgb "blue"
 set y2label "Latency (ms)" textcolor rgb "red"
 set ytics nomirror
@@ -23,7 +23,7 @@ plot 'bars_postgres.dat' using 2:xtic(1) title 'Throughput' axes x1y1 linecolor 
 # Right plot - MariaDB
 unset title
 set title "MariaDB"
-set xlabel "Batching Configuration"
+set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k ops/sec)" textcolor rgb "blue"
 set y2label "Latency (ms)" textcolor rgb "red"
 

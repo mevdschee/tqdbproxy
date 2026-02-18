@@ -1,5 +1,5 @@
-# Target(k) Throughput(k) Latency(ms)
-1 27.2 34.78
-10 266.8 3.74
-100 731.7 13.59
-1000 645.9 74.45
+# BatchHint Throughput(k) Latency(ms)
+batch:0 28.0 33.95
+batch:1 270.0 3.70
+batch:10 758.8 13.08
+batch:100 654.7 73.05
