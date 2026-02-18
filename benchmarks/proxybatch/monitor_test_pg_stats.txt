@@ -1,4 +1,4 @@
-=== PostgreSQL Stats - Wed Feb 18 02:35:45 PM CET 2026 ===
+=== PostgreSQL Stats - Wed Feb 18 02:44:40 PM CET 2026 ===
 
 --- Before Benchmark ---
        metric        | value 
@@ -9,20 +9,20 @@
 
     metric     |   value   
 ---------------+-----------
- Commits       |  51811218
- Rollbacks     |     21122
- Blocks Read   |    148330
- Blocks Hit    | 493871107
- Rows Inserted | 114832196
+ Commits       |  53658310
+ Rollbacks     |     21127
+ Blocks Read   |    151261
+ Blocks Hit    | 505358307
+ Rows Inserted | 117959693
 (5 rows)
 
 
 --- After Benchmark ---
       metric       |   value   
 -------------------+-----------
- Total Commits     |  51811264
- Total Rollbacks   |     21122
- Total Inserts     | 117039293
+ Total Commits     |  53658358
+ Total Rollbacks   |     21127
+ Total Inserts     | 120151646
  Cache Hit Ratio % |     99.97
 (4 rows)
 
@@ -30,7 +30,7 @@
 Table Stats:
  relname | inserts | updates | deletes | live_rows | dead_rows 
 ---------+---------+---------+---------+-----------+-----------
- test    | 2225909 |       0 |       0 |   2207107 |         0
+ test    | 2362025 |       0 |  139044 |   2222981 |         0
 (1 row)
 
 

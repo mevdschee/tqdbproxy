@@ -76,75 +76,78 @@ SELECT 'Rows Inserted', tup_inserted
 FROM pg_stat_database WHERE datname = 'tqdbproxy';
 SQL
 
-# Start real-time monitoring
-echo "timestamp,active_conns,idle_conns,waiting,commits,inserts,rows_per_commit,cache_hit_pct" > "$REALTIME_FILE"
+# Start real-time monitoring  
+echo "timestamp,active_conns,idle_conns,waiting,inserts_per_sec,total_rows,queries_executed,cache_hit_pct" > "$REALTIME_FILE"
 
 START_TIME=$(date +%s)
 END_TIME=$((START_TIME + DURATION))
 
-# Get baseline - use table stats for inserts (more accurate)
+# Get baseline - track inserts and query count
 PREV_STATS=$($PSQL -t -A -c "
 SELECT 
-    (SELECT xact_commit FROM pg_stat_database WHERE datname = '$PGDATABASE') || ',' ||
-    (SELECT COALESCE(n_tup_ins, 0) FROM pg_stat_user_tables WHERE relname = 'test');")
-IFS=',' read -r PREV_COMMITS PREV_INSERTS <<< "$PREV_STATS"
+    COALESCE(n_tup_ins, 0) || ',' ||
+    (SELECT sum(calls) FROM pg_stat_statements WHERE query LIKE '%INSERT INTO test%' AND query NOT LIKE '%pg_stat%')
+FROM pg_stat_user_tables WHERE relname = 'test';")
+IFS=',' read -r PREV_INSERTS PREV_QUERIES <<< "$PREV_STATS"
+# Handle NULL for queries if pg_stat_statements not available
+PREV_QUERIES=${PREV_QUERIES:-0}
 
 # Track totals for summary
-TOTAL_COMMITS=0
 TOTAL_INSERTS=0
+TOTAL_QUERIES=0
 
 while [ $(date +%s) -lt $END_TIME ]; do
     TIMESTAMP=$(date +%s)
     
-    # Get current stats - use table-level insert count
+    # Get current stats - track test table inserts and backend query count
     STATS=$($PSQL -t -A -c "
     SELECT 
         (SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '$PGDATABASE' AND state = 'active') || ',' ||
         (SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '$PGDATABASE' AND state = 'idle') || ',' ||
         (SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '$PGDATABASE' AND wait_event IS NOT NULL) || ',' ||
-        (SELECT xact_commit FROM pg_stat_database WHERE datname = '$PGDATABASE') || ',' ||
         (SELECT COALESCE(n_tup_ins, 0) FROM pg_stat_user_tables WHERE relname = 'test') || ',' ||
+        (SELECT COALESCE(sum(calls), 0) FROM pg_stat_statements WHERE query LIKE '%INSERT INTO test%' AND query NOT LIKE '%pg_stat%') || ',' ||
         (SELECT ROUND(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2) FROM pg_stat_database WHERE datname = '$PGDATABASE');
     " 2>/dev/null)
     
     if [ -n "$STATS" ]; then
-        IFS=',' read -r ACTIVE IDLE WAITING COMMITS INSERTS CACHE_HIT <<< "$STATS"
+        IFS=',' read -r ACTIVE IDLE WAITING INSERTS QUERIES CACHE_HIT <<< "$STATS"
         
         # Calculate rates (per second since last measurement)
-        COMMITS_RATE=$((COMMITS - PREV_COMMITS))
         INSERTS_RATE=$((INSERTS - PREV_INSERTS))
+        QUERIES_RATE=$((QUERIES - PREV_QUERIES))
         
-        # Handle table truncate - if inserts decreased, reset baseline
+        # Handle table truncate/delete - if inserts decreased, reset baseline
         if [ $INSERTS_RATE -lt 0 ]; then
             PREV_INSERTS=$INSERTS
             INSERTS_RATE=0
         fi
         
-        # Calculate rows per commit ratio
-        if [ $COMMITS_RATE -gt 0 ]; then
-            ROWS_PER_COMMIT=$(awk "BEGIN {printf \"%.2f\", $INSERTS_RATE / $COMMITS_RATE}")
+        # Track totals
+        TOTAL_INSERTS=$((TOTAL_INSERTS + INSERTS_RATE))
+        TOTAL_QUERIES=$((TOTAL_QUERIES + QUERIES_RATE))
+        
+        # Calculate batch efficiency (rows per query)
+        if [ $QUERIES_RATE -gt 0 ]; then
+            BATCH_EFF=$(awk "BEGIN {printf \"%.1f\", $INSERTS_RATE / $QUERIES_RATE}")
         else
-            ROWS_PER_COMMIT="0.00"
+            BATCH_EFF="0.0"
         fi
         
-        # Track totals
-        TOTAL_COMMITS=$((TOTAL_COMMITS + COMMITS_RATE))
-        TOTAL_INSERTS=$((TOTAL_INSERTS + INSERTS_RATE))
+        echo "$TIMESTAMP,$ACTIVE,$IDLE,$WAITING,$INSERTS_RATE,$INSERTS,$QUERIES,$CACHE_HIT" >> "$REALTIME_FILE"
         
-        echo "$TIMESTAMP,$ACTIVE,$IDLE,$WAITING,$COMMITS_RATE,$INSERTS_RATE,$ROWS_PER_COMMIT,$CACHE_HIT" >> "$REALTIME_FILE"
-        
-        # Show progress with rows/commit ratio and highlight when batches flush
+        # Show progress - highlight when batch flushes happen
         if [ $INSERTS_RATE -gt 1000 ]; then
             # Highlight batch flush with marker
-            printf "\r[%3ds] Active: %3d | Commits/s: %6d | Inserts/s: %6d | Rows/Commit: %5s | Cache: %5s%% ⚡BATCH FLUSH\n" \
-                $((TIMESTAMP - START_TIME)) "$ACTIVE" "$COMMITS_RATE" "$INSERTS_RATE" "$ROWS_PER_COMMIT" "$CACHE_HIT"
+            printf "\r[%3ds] Active: %3d | Inserts/s: %6d | Queries/s: %5d | BatchEff: %5s | Cache: %5s%% ⚡\n" \
+                $((TIMESTAMP - START_TIME)) "$ACTIVE" "$INSERTS_RATE" "$QUERIES_RATE" "$BATCH_EFF" "$CACHE_HIT"
         else
-            printf "\r[%3ds] Active: %3d | Commits/s: %6d | Inserts/s: %6d | Rows/Commit: %5s | Cache: %5s%%           " \
-                $((TIMESTAMP - START_TIME)) "$ACTIVE" "$COMMITS_RATE" "$INSERTS_RATE" "$ROWS_PER_COMMIT" "$CACHE_HIT"
+            printf "\r[%3ds] Active: %3d | Inserts/s: %6d | Queries/s: %5d | BatchEff: %5s | Cache: %5s%%  " \
+                $((TIMESTAMP - START_TIME)) "$ACTIVE" "$INSERTS_RATE" "$QUERIES_RATE" "$BATCH_EFF" "$CACHE_HIT"
         fi
         
-        PREV_COMMITS=$COMMITS
         PREV_INSERTS=$INSERTS
+        PREV_QUERIES=$QUERIES
     fi
     
     sleep 1
@@ -156,32 +159,19 @@ echo ""
 # Calculate and display summary
 echo "Summary:"
 echo "  Duration:         ${DURATION}s"
-echo "  Total Commits:    $TOTAL_COMMITS"
 echo "  Total Rows Inserted: $TOTAL_INSERTS"
-if [ $TOTAL_COMMITS -gt 0 ]; then
-    AVG_ROWS_PER_COMMIT=$(awk "BEGIN {printf \"%.2f\", $TOTAL_INSERTS / $TOTAL_COMMITS}")
-    echo "  Avg Rows/Commit:  $AVG_ROWS_PER_COMMIT"
-else
-    echo "  Avg Rows/Commit:  N/A (no commits)"
+echo "  Total Backend Queries: $TOTAL_QUERIES"
+if [ $TOTAL_QUERIES -gt 0 ]; then
+    AVG_BATCH=$(awk "BEGIN {printf \"%.1f\", $TOTAL_INSERTS / $TOTAL_QUERIES}")
+    echo "  Avg Batch Size:   $AVG_BATCH rows/query"
+    if (( $(awk "BEGIN {print ($AVG_BATCH > 1.5)}") )); then
+        echo "  ✓ Batching is working!"
+    else
+        echo "  ✗ No effective batching detected"
+    fi
 fi
 echo "  Throughput:       $(awk "BEGIN {printf \"%.1f\", $TOTAL_INSERTS / $DURATION}") rows/sec"
-echo "  Commit Rate:      $(awk "BEGIN {printf \"%.1f\", $TOTAL_COMMITS / $DURATION}") commits/sec"
 echo ""
-
-# Show batching analysis
-if [ $TOTAL_COMMITS -gt 0 ]; then
-    AVG_RATIO=$(awk "BEGIN {printf \"%.2f\", $TOTAL_INSERTS / $TOTAL_COMMITS}")
-    if (( $(awk "BEGIN {print ($AVG_RATIO > 1.5)}") )); then
-        echo "✓ Batching detected: ~$AVG_RATIO rows per transaction"
-    elif (( $(awk "BEGIN {print ($AVG_RATIO > 1.1)}") )); then
-        echo "~ Light batching: ~$AVG_RATIO rows per transaction"
-    else
-        echo "⚠ No batching detected: Each INSERT is a separate transaction (auto-commit)"
-        echo "  Note: Throughput improvements come from reduced network overhead,"
-        echo "        not from transaction-level batching."
-    fi
-    echo ""
-fi
 
 # Get final stats
 echo "" >> "$STATS_FILE"

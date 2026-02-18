@@ -22,7 +22,7 @@ type BenchmarkResult struct {
 	TotalOps        int64
 }
 
-func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, dsn string) BenchmarkResult {
+func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn string) BenchmarkResult {
 	db, err := sql.Open(dbType, dsn)
 	if err != nil {
 		log.Fatal(err)
@@ -55,35 +55,46 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 		}
 	}
 
-	// Setup table
+	// Setup table - create if not exists, then clear data
+	// Using DELETE instead of TRUNCATE/DROP to preserve table stats
 	if dbType == "postgres" {
-		db.Exec("DROP TABLE IF EXISTS test")
-		_, err = db.Exec("CREATE TABLE test (id SERIAL PRIMARY KEY, value INTEGER, created_at BIGINT)")
+		_, err = db.Exec("CREATE TABLE IF NOT EXISTS test (id SERIAL PRIMARY KEY, value INTEGER, created_at BIGINT)")
+		if err != nil {
+			log.Fatal(err)
+		}
+		db.Exec("DELETE FROM test")
 	} else {
-		db.Exec("DROP TABLE IF EXISTS test")
-		_, err = db.Exec("CREATE TABLE test (id INTEGER PRIMARY KEY AUTO_INCREMENT, value INTEGER, created_at BIGINT)")
-	}
-	if err != nil {
-		log.Fatal(err)
+		_, err = db.Exec("CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTO_INCREMENT, value INTEGER, created_at BIGINT)")
+		if err != nil {
+			log.Fatal(err)
+		}
+		db.Exec("DELETE FROM test")
 	}
 
 	// Configure write batch manager with hint-based batching
 	// Different batch windows based on target rate
 	var batchMs int
+	var batchLabel string
 
 	if targetOpsPerSec <= 1_000 {
 		// Baseline: no batching
 		batchMs = 0
+		batchLabel = "NO BATCHING"
 	} else if targetOpsPerSec <= 10_000 {
 		// Low rate: use 1ms batching window
 		batchMs = 1
+		batchLabel = "1ms window"
 	} else if targetOpsPerSec <= 100_000 {
 		// Medium rate: use 10ms batching window
 		batchMs = 10
+		batchLabel = "10ms window"
 	} else {
-		// High rate: use 100ms batching window
-		batchMs = 100
+		// High rate: use 1000ms batching window
+		batchMs = 1000
+		batchLabel = "1000ms window"
 	}
+
+	log.Printf("  Batch config: %s (hint: batch:%d)", batchLabel, batchMs)
 
 	// Track operations and latencies
 	var totalOps atomic.Int64
@@ -101,7 +112,6 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 	}
 
 	startTime := time.Now()
-	endTime := startTime.Add(duration)
 
 	// Choose query based on database backend and include batch hint
 	var insertQuery string
@@ -129,7 +139,12 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 
 			var errorCount int64
 
-			for time.Now().Before(endTime) {
+			for {
+				// Check if we've reached the target number of operations
+				if totalOps.Load() >= totalRecords {
+					break
+				}
+
 				reqStart := time.Now()
 
 				// Use parameterized queries for both databases
@@ -243,14 +258,14 @@ func main() {
 
 	// Test rates with different batching hints
 	targets := []int{1_000, 10_000, 100_000, 1_000_000}
-	duration := 3 * time.Second
+	totalRecords := int64(10_000)
 
 	// PostgreSQL tests via proxy
 	log.Println("=== PostgreSQL Tests (via Proxy) ===")
 	pgDSN := "postgres://tqdbproxy:tqdbproxy@127.0.0.1:5433/tqdbproxy?sslmode=disable"
 	var pgResults []BenchmarkResult
 	for _, target := range targets {
-		result := runBenchmark(target, duration, "postgres", pgDSN)
+		result := runBenchmark(target, totalRecords, "postgres", pgDSN)
 		pgResults = append(pgResults, result)
 		speedup := result.ActualOpsPerSec / float64(pgResults[0].ActualOpsPerSec)
 		log.Printf("  %dk target -> %.0f ops/sec actual, %.2f ms latency (%.1fx speedup)",
@@ -263,7 +278,7 @@ func main() {
 	mysqlDSN := "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy"
 	var mysqlResults []BenchmarkResult
 	for _, target := range targets {
-		result := runBenchmark(target, duration, "mysql", mysqlDSN)
+		result := runBenchmark(target, totalRecords, "mysql", mysqlDSN)
 		mysqlResults = append(mysqlResults, result)
 		speedup := result.ActualOpsPerSec / float64(mysqlResults[0].ActualOpsPerSec)
 		log.Printf("  %dk target -> %.0f ops/sec actual, %.2f ms latency (%.1fx speedup)",

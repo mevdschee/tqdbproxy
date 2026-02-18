@@ -248,18 +248,11 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	}
 	defer db.Close()
 
-	// Initialize write batching for this connection if enabled
+	// Use the global write batching manager (shared across all connections)
+	// This allows batching to consolidate queries from multiple concurrent connections
 	var connWriteBatch *writebatch.Manager
-	if p.config.WriteBatch.Enabled && p.wbCtx != nil {
-		wbCfg := writebatch.Config{
-			MaxBatchSize: p.config.WriteBatch.MaxBatchSize,
-		}
-		connWriteBatch = writebatch.New(db, wbCfg)
-		defer func() {
-			if err := connWriteBatch.Close(); err != nil {
-				log.Printf("[PostgreSQL] Error closing writebatch manager: %v", err)
-			}
-		}()
+	if p.config.WriteBatch.Enabled && p.writeBatch != nil {
+		connWriteBatch = p.writeBatch
 	}
 
 	if err := db.Ping(); err != nil {
@@ -407,42 +400,35 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32, state
 		case msgQuery:
 			p.handleQuery(payload, client, db, state)
 		case msgParse:
-			log.Printf("[PostgreSQL] Parse message received (conn %d)", connID)
 			if err := p.handleParse(payload, client, state); err != nil {
 				log.Printf("[PostgreSQL] Parse error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 				p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 			}
 		case msgBind:
-			log.Printf("[PostgreSQL] Bind message received (conn %d)", connID)
 			if err := p.handleBind(payload, client, state); err != nil {
 				log.Printf("[PostgreSQL] Bind error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 				p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 			}
 		case msgDescribe:
-			log.Printf("[PostgreSQL] Describe message received (conn %d)", connID)
 			if err := p.handleDescribe(payload, client, state); err != nil {
 				log.Printf("[PostgreSQL] Describe error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 			}
 		case msgExecute:
-			log.Printf("[PostgreSQL] Execute message received (conn %d)", connID)
 			if err := p.handleExecute(payload, client, db, connID, state); err != nil {
 				log.Printf("[PostgreSQL] Execute error (conn %d): %v", connID, err)
 				p.sendError(client, "42000", err.Error())
 			}
 		case 'C': // Close
-			log.Printf("[PostgreSQL] Close message received (conn %d)", connID)
 			p.handleClose(payload, client, state)
 		case msgSync:
-			log.Printf("[PostgreSQL] Sync message received (conn %d)", connID)
 			// Send ReadyForQuery
 			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		case msgTerminate:
 			return
 		default:
-			log.Printf("[PostgreSQL] Unhandled message type %c (conn %d)", msgType, connID)
 			// For unhandled messages, send ReadyForQuery
 			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		}
@@ -458,8 +444,6 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 		queryBytes = queryBytes[:len(queryBytes)-1]
 	}
 	query := string(queryBytes)
-
-	log.Printf("[PostgreSQL] handleQuery called, query=%q", query[:min(len(query), 100)])
 
 	// Check for TQDB status query (PostgreSQL style: pg_tqdb_status)
 	queryUpper := strings.ToUpper(strings.TrimSpace(query))
@@ -789,8 +773,6 @@ func (p *Proxy) handleParse(payload []byte, client net.Conn, state *connState) e
 	}
 	query := string(payload[queryStart : queryStart+queryEnd])
 
-	log.Printf("[PostgreSQL] handleParse: stmtName=%q, query=%q", stmtName, query)
-
 	// Store the prepared statement
 	state.preparedStatements[stmtName] = query
 
@@ -813,8 +795,6 @@ func (p *Proxy) handleDescribe(payload []byte, client net.Conn, state *connState
 	}
 	name := string(payload[1 : 1+nameEnd])
 
-	log.Printf("[PostgreSQL] handleDescribe: type=%c, name=%q", descType, name)
-
 	if descType == 'S' {
 		// Describe Statement - need to send ParameterDescription and RowDescription (or NoData)
 		query, ok := state.preparedStatements[name]
@@ -824,7 +804,6 @@ func (p *Proxy) handleDescribe(payload []byte, client net.Conn, state *connState
 
 		// Count parameters ($1, $2, etc.) in the query
 		numParams := countPostgresParams(query)
-		log.Printf("[PostgreSQL] handleDescribe: query=%q, numParams=%d", query, numParams)
 
 		// Send ParameterDescription message
 		// Format: int16 (num params) + int32[] (parameter OIDs, 0 = unknown)
@@ -945,16 +924,12 @@ func (p *Proxy) handleBind(payload []byte, client net.Conn, state *connState) er
 func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connID uint32, state *connState) error {
 	start := time.Now()
 
-	log.Printf("[PostgreSQL] handleExecute called")
-
 	// Extract portal name (null-terminated)
 	portalNameEnd := bytes.IndexByte(payload, 0)
 	if portalNameEnd < 0 {
 		return fmt.Errorf("malformed Execute message: no portal name terminator")
 	}
 	portalName := string(payload[:portalNameEnd])
-
-	log.Printf("[PostgreSQL] Execute portal=%q", portalName)
 
 	// Get bound parameters
 	params, ok := state.boundParams[portalName]
@@ -978,9 +953,6 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 
 	// Parse the query
 	parsed := parser.Parse(query)
-
-	// DEBUG: Log query details
-	log.Printf("[PostgreSQL] Execute: original query=%q, parsed query=%q, num params=%d", query, parsed.Query, len(params))
 
 	file := parsed.File
 	if file == "" {

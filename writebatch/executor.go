@@ -36,6 +36,10 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 		return
 	}
 
+	// Log batch execution
+	log.Printf("[WriteBatch] Executing batch: size=%d, batchKey=%q, delay=%v",
+		batchSize, batchKey, time.Since(firstSeen))
+
 	// Record metrics
 	batchStart := time.Now()
 	if requests[0] != nil {
