@@ -350,3 +350,77 @@ func TestParsedQuery_WriteTTLWarning(t *testing.T) {
 		})
 	}
 }
+
+func TestParsedQuery_BatchMs(t *testing.T) {
+	tests := []struct {
+		query      string
+		expectedMs int
+	}{
+		{
+			"INSERT INTO users VALUES (1)",
+			0, // No hint = no batching
+		},
+		{
+			"/* batch:10 */ INSERT INTO users VALUES (1)",
+			10,
+		},
+		{
+			"/* batch:50 */ UPDATE users SET active = 1",
+			50,
+		},
+		{
+			"/* file:app.go line:42 batch:5 */ DELETE FROM cache",
+			5,
+		},
+		{
+			"/* ttl:60 batch:25 */ SELECT * FROM users",
+			25,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.BatchMs != tt.expectedMs {
+				t.Errorf("BatchMs = %v, want %v", p.BatchMs, tt.expectedMs)
+			}
+		})
+	}
+}
+
+func TestParsedQuery_BatchMs_InvalidValues(t *testing.T) {
+	tests := []struct {
+		query      string
+		expectedMs int
+	}{
+		{
+			"/* batch:-10 */ INSERT INTO users VALUES (1)",
+			0, // Negative values default to 0
+		},
+		{
+			"/* batch:abc */ INSERT INTO users VALUES (1)",
+			0, // Invalid values default to 0
+		},
+		{
+			"/* batch:1000000 */ INSERT INTO users VALUES (1)",
+			100, // Cap at max (100ms)
+		},
+		{
+			"/* batch:150 */ INSERT INTO users VALUES (1)",
+			100, // Values > 100 capped at 100ms
+		},
+		{
+			"/* batch:0 */ INSERT INTO users VALUES (1)",
+			0, // Explicit 0 is allowed
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			p := Parse(tt.query)
+			if p.BatchMs != tt.expectedMs {
+				t.Errorf("BatchMs = %v, want %v", p.BatchMs, tt.expectedMs)
+			}
+		})
+	}
+}

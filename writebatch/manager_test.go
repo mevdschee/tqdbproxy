@@ -36,7 +36,7 @@ func TestManager_SingleWrite(t *testing.T) {
 	defer m.Close()
 
 	ctx := context.Background()
-	result := m.Enqueue(ctx, "test:1", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"test"})
+	result := m.Enqueue(ctx, "test:1", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"test"}, 0)
 
 	if result.Error != nil {
 		t.Fatalf("Expected no error, got %v", result.Error)
@@ -58,9 +58,7 @@ func TestManager_BatchIdenticalQueries(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	config := DefaultConfig()
-	config.InitialDelayMs = 10 // Small delay for testing
-	m := New(db, config)
+	m := New(db, DefaultConfig())
 	defer m.Close()
 
 	ctx := context.Background()
@@ -71,7 +69,7 @@ func TestManager_BatchIdenticalQueries(t *testing.T) {
 		go func(n int) {
 			result := m.Enqueue(ctx, "test:batch",
 				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-				[]interface{}{"batch", n})
+				[]interface{}{"batch", n}, 10)
 			results <- result
 		}(i)
 	}
@@ -99,9 +97,7 @@ func TestManager_BatchMixedQueries(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	config := DefaultConfig()
-	config.InitialDelayMs = 10
-	m := New(db, config)
+	m := New(db, DefaultConfig())
 	defer m.Close()
 
 	ctx := context.Background()
@@ -111,7 +107,7 @@ func TestManager_BatchMixedQueries(t *testing.T) {
 	go func() {
 		result := m.Enqueue(ctx, "test:mixed",
 			"INSERT INTO test_writes (data) VALUES (?)",
-			[]interface{}{"insert"})
+			[]interface{}{"insert"}, 10)
 		results <- result
 	}()
 
@@ -119,7 +115,7 @@ func TestManager_BatchMixedQueries(t *testing.T) {
 		// Different query - should trigger transaction batch
 		result := m.Enqueue(ctx, "test:mixed",
 			"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-			[]interface{}{"insert2", 42})
+			[]interface{}{"insert2", 42}, 10)
 		results <- result
 	}()
 
@@ -144,8 +140,7 @@ func TestManager_BatchSizeLimit(t *testing.T) {
 	defer db.Close()
 
 	config := DefaultConfig()
-	config.InitialDelayMs = 100 // Longer delay
-	config.MaxBatchSize = 10    // Small batch size for testing
+	config.MaxBatchSize = 10 // Small batch size for testing
 	m := New(db, config)
 	defer m.Close()
 
@@ -157,7 +152,7 @@ func TestManager_BatchSizeLimit(t *testing.T) {
 		go func(n int) {
 			result := m.Enqueue(ctx, "test:limit",
 				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-				[]interface{}{"batch", n})
+				[]interface{}{"batch", n}, 100)
 			results <- result
 		}(i)
 	}
@@ -182,9 +177,7 @@ func TestManager_DelayTiming(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	config := DefaultConfig()
-	config.InitialDelayMs = 50 // 50ms delay
-	m := New(db, config)
+	m := New(db, DefaultConfig())
 	defer m.Close()
 
 	ctx := context.Background()
@@ -192,7 +185,7 @@ func TestManager_DelayTiming(t *testing.T) {
 
 	result := m.Enqueue(ctx, "test:timing",
 		"INSERT INTO test_writes (data) VALUES (?)",
-		[]interface{}{"timing"})
+		[]interface{}{"timing"}, 50)
 
 	elapsed := time.Since(start)
 
@@ -215,9 +208,7 @@ func TestManager_ConcurrentEnqueues(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	config := DefaultConfig()
-	config.InitialDelayMs = 5
-	m := New(db, config)
+	m := New(db, DefaultConfig())
 	defer m.Close()
 
 	ctx := context.Background()
@@ -233,7 +224,7 @@ func TestManager_ConcurrentEnqueues(t *testing.T) {
 			defer wg.Done()
 			result := m.Enqueue(ctx, "test:concurrent",
 				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
-				[]interface{}{"concurrent", n})
+				[]interface{}{"concurrent", n}, 5)
 			if result.Error != nil {
 				errors <- result.Error
 			}
@@ -260,9 +251,7 @@ func TestManager_ContextCancellation(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	config := DefaultConfig()
-	config.InitialDelayMs = 100 // Long delay
-	m := New(db, config)
+	m := New(db, DefaultConfig())
 	defer m.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -272,7 +261,7 @@ func TestManager_ContextCancellation(t *testing.T) {
 
 	result := m.Enqueue(ctx, "test:cancel",
 		"INSERT INTO test_writes (data) VALUES (?)",
-		[]interface{}{"cancelled"})
+		[]interface{}{"cancelled"}, 100)
 
 	if result.Error == nil {
 		t.Error("Expected context cancellation error, got nil")
@@ -294,7 +283,7 @@ func TestManager_Close(t *testing.T) {
 	ctx := context.Background()
 	result := m.Enqueue(ctx, "test:closed",
 		"INSERT INTO test_writes (data) VALUES (?)",
-		[]interface{}{"closed"})
+		[]interface{}{"closed"}, 0)
 
 	if result.Error != ErrManagerClosed {
 		t.Errorf("Expected ErrManagerClosed, got %v", result.Error)
@@ -313,30 +302,10 @@ func TestManager_ErrorHandling(t *testing.T) {
 	// Try to insert into non-existent table
 	result := m.Enqueue(ctx, "test:error",
 		"INSERT INTO nonexistent (data) VALUES (?)",
-		[]interface{}{"error"})
+		[]interface{}{"error"}, 0)
 
 	if result.Error == nil {
 		t.Error("Expected error for invalid query, got nil")
-	}
-}
-
-func TestManager_SetGetDelay(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	m := New(db, DefaultConfig())
-	defer m.Close()
-
-	// Initial delay should be 1ms = 1000 microseconds
-	if delay := m.GetDelay(); delay != 1000 {
-		t.Errorf("Expected initial delay of 1000 microseconds, got %d", delay)
-	}
-
-	// Set new delay
-	m.SetDelay(5000) // 5ms
-
-	if delay := m.GetDelay(); delay != 5000 {
-		t.Errorf("Expected delay of 5000 microseconds, got %d", delay)
 	}
 }
 
@@ -353,7 +322,7 @@ func BenchmarkManager_SingleWrite(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m.Enqueue(ctx, "bench:single", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"})
+		m.Enqueue(ctx, "bench:single", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 0)
 	}
 }
 
@@ -363,9 +332,7 @@ func BenchmarkManager_BatchedWrites(b *testing.B) {
 
 	db.Exec(`CREATE TABLE test_writes (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT)`)
 
-	config := DefaultConfig()
-	config.InitialDelayMs = 1
-	m := New(db, config)
+	m := New(db, DefaultConfig())
 	defer m.Close()
 
 	ctx := context.Background()
@@ -373,7 +340,7 @@ func BenchmarkManager_BatchedWrites(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			m.Enqueue(ctx, "bench:batch", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"})
+			m.Enqueue(ctx, "bench:batch", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 1)
 		}
 	})
 }

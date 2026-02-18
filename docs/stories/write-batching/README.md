@@ -45,9 +45,21 @@ on a specific aspect of the implementation.
    - Integration and load tests
    - Edge case validation
 
+8. **[Batching Hints](08-batching-hints.md)** (3-4 days)
+   - Remove adaptive delay system
+   - Add max_wait_ms hint parsing
+   - Simplify configuration (max_batch_size only)
+   - Developer-controlled batching behavior
+
+9. **[Enhanced Metrics](09-enhanced-metrics.md)** (2-3 days)
+   - Backend query frequency tracking
+   - Batch size distribution histogram
+   - Aggregation factor calculation
+   - Batch effectiveness monitoring
+
 ## Total Estimated Effort
 
-**22-30 days** (4.5-6 weeks)
+**27-37 days** (5.5-7.5 weeks)
 
 ## Dependencies
 
@@ -56,7 +68,7 @@ on a specific aspect of the implementation.
     ↓
 02-write-batch-manager
     ↓
-03-adaptive-delay-system
+03-adaptive-delay-system (DEPRECATED - replaced by 08)
     ↓
 04-metrics-monitoring
     ↓
@@ -65,10 +77,18 @@ on a specific aspect of the implementation.
 06-benchmark-suite
     ↓
 07-testing-validation
+    ↓
+08-batching-hints (replaces adaptive system)
+    ↓
+09-enhanced-metrics (additional observability)
 ```
 
-Sub-plans 1-4 can have some parallel work, but generally follow the sequence
-above.
+**Note**: Sub-plans 1-7 represent the initial implementation with adaptive
+delays. Sub-plans 8-9 represent a redesign that replaces the adaptive system
+with explicit developer-controlled batching hints and enhanced metrics.
+
+For new implementations, you can skip sub-plan 3 and go directly to sub-plan 8
+after completing sub-plan 2.
 
 ## Getting Started
 

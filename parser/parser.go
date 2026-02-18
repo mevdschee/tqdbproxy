@@ -19,17 +19,18 @@ const (
 
 // ParsedQuery contains extracted information from a SQL query
 type ParsedQuery struct {
-	Type  QueryType
-	TTL   int    // TTL in seconds, 0 means no caching
-	DB    string // Database name from FQN
-	File  string // Source file from hint
-	Line  int    // Source line from hint
-	Query string // Original query
+	Type    QueryType
+	TTL     int    // TTL in seconds, 0 means no caching
+	DB      string // Database name from FQN
+	File    string // Source file from hint
+	Line    int    // Source line from hint
+	BatchMs int    // Maximum wait time for batching in ms (0 = no batching)
+	Query   string // Original query
 }
 
 var (
-	// Match /* ttl:60 */ or /*ttl:60*/ or /* ttl:60 file:user.go line:42 */
-	hintRegex = regexp.MustCompile(`/\*\s*(ttl:(\d+))?\s*(file:(\S+))?\s*(line:(\d+))?\s*\*/`)
+	// Match /* ttl:60 */ or /*ttl:60*/ or /* ttl:60 file:user.go line:42 batch:10 */
+	hintRegex = regexp.MustCompile(`/\*\s*(ttl:(\d+))?\s*(file:(\S+))?\s*(line:(\d+))?\s*(batch:(\d+))?\s*\*/`)
 	// Match query type (allows comments before keyword)
 	queryTypeRegex = regexp.MustCompile(`(?i)\b(SELECT|INSERT|UPDATE|DELETE)\b`)
 	// Match Fully Qualified Names (FQN) like db.table or `db`.`table`
@@ -76,6 +77,16 @@ func Parse(query string) *ParsedQuery {
 		}
 		if matches[6] != "" {
 			p.Line, _ = strconv.Atoi(matches[6])
+		}
+		if matches[8] != "" {
+			batchMs, _ := strconv.Atoi(matches[8])
+			// Cap at 100ms and reject negative values
+			if batchMs < 0 {
+				batchMs = 0
+			} else if batchMs > 100 {
+				batchMs = 100
+			}
+			p.BatchMs = batchMs
 		}
 		// Remove the hint comment from the query
 		p.Query = hintRegex.ReplaceAllString(query, "")

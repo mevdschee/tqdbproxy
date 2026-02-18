@@ -10,33 +10,30 @@ import (
 
 // Manager handles batching of write operations
 type Manager struct {
-	groups       sync.Map // map[string]*BatchGroup
-	config       Config
-	db           *sql.DB
-	currentDelay atomic.Int64 // in microseconds
-	closed       atomic.Bool
-
-	// Throughput tracking
-	opsPerSecond atomic.Uint64 // Current operations per second
-	opsCounter   atomic.Uint64 // Total ops executed in current window
-	lastReset    atomic.Int64  // Unix timestamp of last reset
+	groups sync.Map // map[string]*BatchGroup
+	config Config
+	db     *sql.DB
+	closed atomic.Bool
 }
 
 // New creates a new write batch manager
 func New(db *sql.DB, config Config) *Manager {
-	m := &Manager{
+	return &Manager{
 		db:     db,
 		config: config,
 	}
-	m.currentDelay.Store(int64(config.InitialDelayMs * 1000))
-	m.lastReset.Store(time.Now().Unix())
-	return m
 }
 
 // Enqueue adds a write operation to the batch queue and waits for its result
-func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}) WriteResult {
+// batchMs is the maximum wait time in milliseconds (0 = execute immediately)
+func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int) WriteResult {
 	if m.closed.Load() {
 		return WriteResult{Error: ErrManagerClosed}
+	}
+
+	// If no wait time specified, execute immediately (no batching)
+	if batchMs == 0 {
+		return m.executeImmediate(ctx, query, params)
 	}
 
 	req := &WriteRequest{
@@ -65,14 +62,14 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 		// Group has been processed, this shouldn't happen but handle it
 		group.mu.Unlock()
 		// Retry with a fresh lookup
-		return m.Enqueue(ctx, batchKey, query, params)
+		return m.Enqueue(ctx, batchKey, query, params, batchMs)
 	}
 	group.Requests = append(group.Requests, req)
 	currentSize := len(group.Requests)
 
 	if isFirst {
-		// First request - start timer
-		delay := time.Duration(m.currentDelay.Load()) * time.Microsecond
+		// First request - start timer with specified delay
+		delay := time.Duration(batchMs) * time.Millisecond
 		group.timer = time.AfterFunc(delay, func() {
 			m.executeBatch(batchKey, group)
 		})
@@ -102,57 +99,26 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 	}
 }
 
-// SetDelay updates the current delay for new batches (for adaptive delay system)
-func (m *Manager) SetDelay(delayMicros int64) {
-	m.currentDelay.Store(delayMicros)
-}
+// executeImmediate executes a query immediately without batching
+func (m *Manager) executeImmediate(ctx context.Context, query string, params []interface{}) WriteResult {
+	result, err := m.db.ExecContext(ctx, query, params...)
+	if err != nil {
+		return WriteResult{Error: err}
+	}
 
-// GetDelay returns the current delay in microseconds
-func (m *Manager) GetDelay() int64 {
-	return m.currentDelay.Load()
+	affected, _ := result.RowsAffected()
+	lastID, _ := result.LastInsertId()
+
+	return WriteResult{
+		AffectedRows: affected,
+		LastInsertID: lastID,
+	}
 }
 
 // Close shuts down the manager and waits for in-flight batches
 func (m *Manager) Close() error {
 	m.closed.Store(true)
-	// Wait for in-flight batches to complete
-	time.Sleep(time.Duration(m.config.MaxDelayMs) * time.Millisecond * 2)
+	// Wait a moment for in-flight batches to complete
+	time.Sleep(200 * time.Millisecond)
 	return nil
-}
-
-// updateThroughput updates the operations per second metric
-func (m *Manager) updateThroughput(batchSize int) {
-	m.opsCounter.Add(uint64(batchSize))
-
-	// Calculate ops/sec over the last second
-	now := time.Now().Unix()
-	lastReset := m.lastReset.Load()
-
-	if now > lastReset {
-		ops := m.opsCounter.Swap(0)
-		elapsed := now - lastReset
-		if elapsed > 0 {
-			opsPerSec := ops / uint64(elapsed)
-			m.opsPerSecond.Store(opsPerSec)
-		}
-		m.lastReset.Store(now)
-	}
-}
-
-// forceThroughputUpdate manually triggers a throughput calculation (for testing)
-func (m *Manager) forceThroughputUpdate() {
-	now := time.Now().Unix()
-	lastReset := m.lastReset.Load()
-	ops := m.opsCounter.Load()
-
-	elapsed := now - lastReset
-	if elapsed > 0 {
-		opsPerSec := ops / uint64(elapsed)
-		m.opsPerSecond.Store(opsPerSec)
-	} else if elapsed == 0 && ops > 0 {
-		// All ops happened within same second, estimate as ops * 1
-		m.opsPerSecond.Store(ops)
-	}
-	m.opsCounter.Store(0)
-	m.lastReset.Store(now)
 }

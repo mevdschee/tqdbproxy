@@ -55,9 +55,6 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 		metrics.WriteBatchLatency.WithLabelValues(queryLabel).Observe(time.Since(batchStart).Seconds())
 		metrics.WriteBatchedTotal.WithLabelValues(getQueryType(requests[0].Query)).Add(float64(batchSize))
 	}
-
-	// Update throughput metrics
-	m.updateThroughput(batchSize)
 }
 
 // truncateQuery truncates a query for use as a metric label

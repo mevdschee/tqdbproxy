@@ -47,7 +47,7 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 	// Adapt delay based on target rate to show different latencies
 	var initialDelay, minDelay, maxDelay int
 	var writeThreshold int
-	
+
 	if targetOpsPerSec <= 10_000 {
 		// Low rate: prioritize latency
 		initialDelay = 5
@@ -67,7 +67,7 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 		maxDelay = 100
 		writeThreshold = 500_000
 	}
-	
+
 	cfg := writebatch.Config{
 		InitialDelayMs:  initialDelay,
 		MaxDelayMs:      maxDelay,
@@ -89,13 +89,13 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 	// Scale workers based on target rate to avoid over-saturation at low rates
 	var numWorkers int
 	if targetOpsPerSec <= 10_000 {
-		numWorkers = 1000  // Fewer workers for low rates
+		numWorkers = 1000 // Fewer workers for low rates
 	} else if targetOpsPerSec <= 100_000 {
 		numWorkers = 10000
 	} else {
-		numWorkers = 50000  // Max workers for high rates
+		numWorkers = 50000 // Max workers for high rates
 	}
-	
+
 	startTime := time.Now()
 	endTime := startTime.Add(duration)
 

@@ -26,14 +26,8 @@ type ProxyConfig struct {
 
 // WriteBatchConfig holds configuration for write batching
 type WriteBatchConfig struct {
-	Enabled         bool    // Enable write batching
-	InitialDelayMs  int     // Initial delay in milliseconds
-	MaxDelayMs      int     // Maximum delay in milliseconds
-	MinDelayMs      int     // Minimum delay in milliseconds
-	MaxBatchSize    int     // Maximum batch size
-	WriteThreshold  float64 // Writes per second threshold for adaptive delay
-	AdaptiveStep    float64 // Adaptive delay adjustment step multiplier
-	MetricsInterval int     // Metrics collection interval in seconds
+	Enabled      bool // Enable write batching
+	MaxBatchSize int  // Maximum batch size
 }
 
 // BackendConfig holds configuration for a single backend pool (primary + replicas)
@@ -76,14 +70,8 @@ func loadProxyConfig(cfg *ini.File, protocol, defaultListen string) ProxyConfig 
 		Backends: make(map[string]BackendConfig),
 		DBMap:    make(map[string]string),
 		WriteBatch: WriteBatchConfig{
-			Enabled:         sec.Key("writebatch_enabled").MustBool(false),
-			InitialDelayMs:  sec.Key("writebatch_initial_delay_ms").MustInt(10),
-			MaxDelayMs:      sec.Key("writebatch_max_delay_ms").MustInt(100),
-			MinDelayMs:      sec.Key("writebatch_min_delay_ms").MustInt(1),
-			MaxBatchSize:    sec.Key("writebatch_max_batch_size").MustInt(1000),
-			WriteThreshold:  sec.Key("writebatch_write_threshold").MustFloat64(1000.0),
-			AdaptiveStep:    sec.Key("writebatch_adaptive_step").MustFloat64(1.5),
-			MetricsInterval: sec.Key("writebatch_metrics_interval").MustInt(60),
+			Enabled:      sec.Key("writebatch_enabled").MustBool(false),
+			MaxBatchSize: sec.Key("writebatch_max_batch_size").MustInt(1000),
 		},
 	}
 
