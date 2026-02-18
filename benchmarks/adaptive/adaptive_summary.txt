@@ -1,0 +1,70 @@
+Adaptive Write Batching Benchmark Results
+==========================================
+
+Date: 2026-02-18 01:26:31
+
+Target Load: 1.0k ops/sec
+  Duration:         10.201041776s
+  Total Operations: 9.9k
+  Actual Throughput: 970 ops/sec (97.0% of target)
+  Average Delay:    3.12 ms
+  Final Delay:      1.00 ms
+  Delay Analysis:
+    Initial:  10.00 ms
+    Mid-run:  1.32 ms
+    Final:    1.00 ms
+    Change:   -9.00 ms (decreased - low load)
+
+Target Load: 10.0k ops/sec
+  Duration:         10.222157814s
+  Total Operations: 47.2k
+  Actual Throughput: 4.6k ops/sec (46.2% of target)
+  Average Delay:    26.27 ms
+  Final Delay:      33.75 ms
+  Delay Analysis:
+    Initial:  10.00 ms
+    Mid-run:  33.75 ms
+    Final:    33.75 ms
+    Change:   +23.75 ms (increased - high load)
+
+Target Load: 100.0k ops/sec
+  Duration:         10.211545276s
+  Total Operations: 58.2k
+  Actual Throughput: 5.7k ops/sec (5.7% of target)
+  Average Delay:    23.73 ms
+  Final Delay:      33.74 ms
+  Delay Analysis:
+    Initial:  10.00 ms
+    Mid-run:  33.74 ms
+    Final:    33.74 ms
+    Change:   +23.74 ms (increased - high load)
+
+Target Load: 1.0M ops/sec
+  Duration:         10.20441093s
+  Total Operations: 40.6k
+  Actual Throughput: 4.0k ops/sec (0.4% of target)
+  Average Delay:    28.71 ms
+  Final Delay:      33.75 ms
+  Delay Analysis:
+    Initial:  10.00 ms
+    Mid-run:  33.75 ms
+    Final:    33.75 ms
+    Change:   +23.75 ms (increased - high load)
+
+Key Insights:
+=============
+
+1. Delay Range: 3.12 ms to 28.71 ms
+   - Lower delays at lower throughput (more responsive)
+   - Higher delays at higher throughput (more batching)
+
+2. Adaptive Behavior:
+   - System automatically adjusts delay based on load
+   - Balances latency vs batching efficiency
+   - Responds to changes in real-time
+
+3. Recommendations:
+   - Low load (1.0k ops/s): Use min delay ~3ms for responsiveness
+   - Low load (10.0k ops/s): Use min delay ~26ms for responsiveness
+   - High load (100.0k ops/s): Use max delay ~24ms for throughput
+   - High load (1.0M ops/s): Use max delay ~29ms for throughput
