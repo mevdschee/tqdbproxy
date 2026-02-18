@@ -1,0 +1,268 @@
+package mariadb
+
+import (
+	"database/sql"
+	"fmt"
+	"testing"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+func TestBatchSizeReporting(t *testing.T) {
+	// Connect to proxy
+	// Note: Standard db.Exec() uses prepared statements which strip comments
+	// We need to use a connection that forces text protocol
+	db, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer db.Close()
+
+	// Set max connections to 1 to ensure we use the same connection
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	// Create test table
+	_, err = db.Exec("DROP TABLE IF EXISTS batch_test")
+	if err != nil {
+		t.Fatalf("Failed to drop table: %v", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE batch_test (id INT PRIMARY KEY AUTO_INCREMENT, value INT)")
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+	defer db.Exec("DROP TABLE IF EXISTS batch_test")
+
+	// Execute writes with batch hints using Query (not Exec) to avoid prepared statements
+	// The batch hint must be sent as part of the SQL text, not through binary protocol
+	numQueries := 10
+	for i := 0; i < numQueries; i++ {
+		query := fmt.Sprintf("/* batch:1000 */ INSERT INTO batch_test (value) VALUES (%d)", i)
+		rows, err := db.Query(query)
+		if err != nil {
+			t.Fatalf("Failed to execute query %d: %v", i, err)
+		}
+		rows.Close()
+	}
+
+	// Wait a moment for batch to flush (batch:1000 means 1000ms window)
+	time.Sleep(1500 * time.Millisecond)
+
+	// Query SHOW TQDB STATUS to get batch size
+	rows, err := db.Query("SHOW TQDB STATUS")
+	if err != nil {
+		t.Fatalf("Failed to query TQDB status: %v", err)
+	}
+	defer rows.Close()
+
+	var batchSize int
+	var foundBatchSize bool
+
+	for rows.Next() {
+		var variable, value string
+		if err := rows.Scan(&variable, &value); err != nil {
+			t.Fatalf("Failed to scan row: %v", err)
+		}
+
+		t.Logf("TQDB Status: %s = %s", variable, value)
+
+		if variable == "LastBatchSize" {
+			fmt.Sscanf(value, "%d", &batchSize)
+			foundBatchSize = true
+		}
+	}
+
+	if !foundBatchSize {
+		t.Fatalf("LastBatchSize not found in SHOW TQDB STATUS")
+	}
+
+	if batchSize != numQueries {
+		t.Errorf("Expected batch size %d, got %d", numQueries, batchSize)
+	}
+
+	t.Logf("✓ Batch size correctly reported as %d", batchSize)
+}
+
+func TestBatchSizeWithMultipleBatches(t *testing.T) {
+	// Connect to proxy
+	db, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer db.Close()
+
+	// Set max connections to 1 to ensure we use the same connection
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	// Create test table
+	_, err = db.Exec("DROP TABLE IF EXISTS batch_test")
+	if err != nil {
+		t.Fatalf("Failed to drop table: %v", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE batch_test (id INT PRIMARY KEY AUTO_INCREMENT, value INT)")
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+	defer db.Exec("DROP TABLE IF EXISTS batch_test")
+
+	// Execute first batch with batch:100 hint (100ms window)
+	firstBatchSize := 5
+	for i := 0; i < firstBatchSize; i++ {
+		_, err := db.Exec(fmt.Sprintf("/* batch:100 */ INSERT INTO batch_test (value) VALUES (%d)", i))
+		if err != nil {
+			t.Fatalf("Failed to execute query %d: %v", i, err)
+		}
+	}
+
+	// Wait for first batch to flush
+	time.Sleep(150 * time.Millisecond)
+
+	// Check batch size
+	rows, err := db.Query("SHOW TQDB STATUS")
+	if err != nil {
+		t.Fatalf("Failed to query TQDB status: %v", err)
+	}
+
+	var firstReportedSize int
+	for rows.Next() {
+		var variable, value string
+		if err := rows.Scan(&variable, &value); err != nil {
+			rows.Close()
+			t.Fatalf("Failed to scan row: %v", err)
+		}
+		if variable == "LastBatchSize" {
+			fmt.Sscanf(value, "%d", &firstReportedSize)
+		}
+	}
+	rows.Close()
+
+	if firstReportedSize != firstBatchSize {
+		t.Errorf("First batch: expected size %d, got %d", firstBatchSize, firstReportedSize)
+	}
+
+	// Execute second batch with different size
+	secondBatchSize := 8
+	for i := 0; i < secondBatchSize; i++ {
+		_, err := db.Exec(fmt.Sprintf("/* batch:100 */ INSERT INTO batch_test (value) VALUES (%d)", i+100))
+		if err != nil {
+			t.Fatalf("Failed to execute query %d in second batch: %v", i, err)
+		}
+	}
+
+	// Wait for second batch to flush
+	time.Sleep(150 * time.Millisecond)
+
+	// Check batch size again
+	rows, err = db.Query("SHOW TQDB STATUS")
+	if err != nil {
+		t.Fatalf("Failed to query TQDB status: %v", err)
+	}
+	defer rows.Close()
+
+	var secondReportedSize int
+	for rows.Next() {
+		var variable, value string
+		if err := rows.Scan(&variable, &value); err != nil {
+			t.Fatalf("Failed to scan row: %v", err)
+		}
+		if variable == "LastBatchSize" {
+			fmt.Sscanf(value, "%d", &secondReportedSize)
+		}
+	}
+
+	if secondReportedSize != secondBatchSize {
+		t.Errorf("Second batch: expected size %d, got %d", secondBatchSize, secondReportedSize)
+	}
+
+	t.Logf("✓ First batch size: %d, Second batch size: %d", firstReportedSize, secondReportedSize)
+}
+
+func TestWriteBatchBackendReporting(t *testing.T) {
+	// Connect to proxy
+	db, err := sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy")
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer db.Close()
+
+	// Set max connections to 1 to ensure we use the same connection
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	// Create test table
+	_, err = db.Exec("DROP TABLE IF EXISTS batch_backend_test")
+	if err != nil {
+		t.Fatalf("Failed to drop table: %v", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE batch_backend_test (id INT PRIMARY KEY AUTO_INCREMENT, value INT)")
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+	defer db.Exec("DROP TABLE IF EXISTS batch_backend_test")
+
+	// Execute batched inserts
+	numQueries := 5
+	for i := 0; i < numQueries; i++ {
+		_, err := db.Exec(fmt.Sprintf("/* batch:500 */ INSERT INTO batch_backend_test (value) VALUES (%d)", i))
+		if err != nil {
+			t.Fatalf("Failed to execute query %d: %v", i, err)
+		}
+	}
+
+	// Wait for batch to flush (500ms window + buffer)
+	time.Sleep(700 * time.Millisecond)
+
+	// Query SHOW TQDB STATUS
+	rows, err := db.Query("SHOW TQDB STATUS")
+	if err != nil {
+		t.Fatalf("Failed to query TQDB status: %v", err)
+	}
+	defer rows.Close()
+
+	var backend string
+	var batchSize int
+	var foundBackend, foundBatchSize bool
+
+	for rows.Next() {
+		var variable, value string
+		if err := rows.Scan(&variable, &value); err != nil {
+			t.Fatalf("Failed to scan row: %v", err)
+		}
+
+		t.Logf("TQDB Status: %s = %s", variable, value)
+
+		if variable == "Backend" {
+			backend = value
+			foundBackend = true
+		}
+		if variable == "LastBatchSize" {
+			fmt.Sscanf(value, "%d", &batchSize)
+			foundBatchSize = true
+		}
+	}
+
+	if !foundBackend {
+		t.Fatalf("Backend not found in SHOW TQDB STATUS")
+	}
+
+	// Verify backend is write-batch (this confirms batching is enabled and working)
+	if backend != "write-batch" {
+		t.Errorf("Expected backend 'write-batch', got '%s' - write batching may not be enabled", backend)
+	}
+
+	if !foundBatchSize {
+		t.Errorf("LastBatchSize not found in SHOW TQDB STATUS")
+	} else if batchSize != numQueries {
+		t.Errorf("Expected batch size %d, got %d", numQueries, batchSize)
+	}
+
+	if backend == "write-batch" && foundBatchSize && batchSize == numQueries {
+		t.Logf("✓ Write batching is enabled and working correctly")
+		t.Logf("✓ Backend: %s, Batch size: %d", backend, batchSize)
+	}
+}
