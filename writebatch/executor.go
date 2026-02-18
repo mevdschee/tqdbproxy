@@ -1,6 +1,7 @@
 package writebatch
 
 import (
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -126,17 +127,27 @@ func (m *Manager) executeBatchedWrites(requests []*WriteRequest) {
 }
 
 // executePreparedBatch executes identical queries using a prepared statement
+// wrapped in a single transaction for better performance (single commit)
 func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
-	// Check if this is an INSERT statement that can be batched
 	firstQuery := requests[0].Query
-	if isBatchableInsert(firstQuery) && len(requests) > 1 {
-		m.executeTrueBatchedInsert(requests)
+
+	log.Printf("[WriteBatch] executePreparedBatch: query=%q, numRequests=%d, firstParams=%v",
+		firstQuery, len(requests), requests[0].Params)
+
+	// Start a transaction for the batch
+	tx, err := m.db.Begin()
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
 		return
 	}
 
-	// Fallback: execute individually with prepared statement
-	stmt, err := m.db.Prepare(firstQuery)
+	// Prepare statement within transaction
+	stmt, err := tx.Prepare(firstQuery)
 	if err != nil {
+		log.Printf("[WriteBatch] Prepare error: %v", err)
+		tx.Rollback()
 		for _, req := range requests {
 			req.ResultChan <- WriteResult{Error: err}
 		}
@@ -144,19 +155,46 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 	}
 	defer stmt.Close()
 
-	for _, req := range requests {
+	// Execute each query and collect results
+	results := make([]WriteResult, len(requests))
+	hasError := false
+
+	for i, req := range requests {
 		result, err := stmt.Exec(req.Params...)
 		if err != nil {
-			req.ResultChan <- WriteResult{Error: err}
+			results[i] = WriteResult{Error: err}
+			hasError = true
 			continue
 		}
 
 		affected, _ := result.RowsAffected()
 		lastID, _ := result.LastInsertId()
-		req.ResultChan <- WriteResult{
+		results[i] = WriteResult{
 			AffectedRows: affected,
 			LastInsertID: lastID,
 		}
+	}
+
+	// If any error occurred, rollback and send errors
+	if hasError {
+		tx.Rollback()
+		for i, req := range requests {
+			req.ResultChan <- results[i]
+		}
+		return
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	// Send successful results
+	for i, req := range requests {
+		req.ResultChan <- results[i]
 	}
 }
 

@@ -1,0 +1,18 @@
+=== PostgreSQL Stats - Wed Feb 18 02:39:57 PM CET 2026 ===
+
+--- Before Benchmark ---
+       metric        | value 
+---------------------+-------
+ Active Connections: |     1
+ Idle Connections:   |     0
+(2 rows)
+
+    metric     |   value   
+---------------+-----------
+ Commits       |  52588501
+ Rollbacks     |     21125
+ Blocks Read   |    151204
+ Blocks Hit    | 502640408
+ Rows Inserted | 117426516
+(5 rows)
+

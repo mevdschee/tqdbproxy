@@ -1,0 +1,76 @@
+=== PostgreSQL Stats - Wed Feb 18 01:50:54 PM CET 2026 ===
+
+--- Before Benchmark ---
+       metric        | value 
+---------------------+-------
+ Active Connections: |     1
+ Idle Connections:   |     0
+(2 rows)
+
+    metric     |   value   
+---------------+-----------
+ Commits       |  48623806
+ Rollbacks     |     21112
+ Blocks Read   |    131390
+ Blocks Hit    | 470749686
+ Rows Inserted | 108310550
+(5 rows)
+
+
+--- After Benchmark ---
+      metric       |   value   
+-------------------+-----------
+ Total Commits     |  49798807
+ Total Rollbacks   |     21112
+ Total Inserts     | 109485295
+ Cache Hit Ratio % |     99.97
+(4 rows)
+
+
+Table Stats:
+ relname | inserts | updates | deletes | live_rows | dead_rows 
+---------+---------+---------+---------+-----------+-----------
+ test    | 1174708 |       0 |       0 |   1174708 |         0
+(1 row)
+
+
+Lock Stats:
+      mode       | count 
+-----------------+-------
+ AccessShareLock |     1
+(1 row)
+
+
+Recent INSERT Statements (if pg_stat_statements enabled):
+ERROR:  relation "pg_stat_statements" does not exist
+LINE 6: FROM pg_stat_statements
+             ^
+
+--- After Benchmark ---
+      metric       |   value   
+-------------------+-----------
+ Total Commits     |  49798838
+ Total Rollbacks   |     21113
+ Total Inserts     | 109485298
+ Cache Hit Ratio % |     99.97
+(4 rows)
+
+
+Table Stats:
+ relname | inserts | updates | deletes | live_rows | dead_rows 
+---------+---------+---------+---------+-----------+-----------
+ test    | 1174708 |       0 |       0 |   1174708 |         0
+(1 row)
+
+
+Lock Stats:
+      mode       | count 
+-----------------+-------
+ AccessShareLock |     1
+(1 row)
+
+
+Recent INSERT Statements (if pg_stat_statements enabled):
+ERROR:  relation "pg_stat_statements" does not exist
+LINE 6: FROM pg_stat_statements
+             ^

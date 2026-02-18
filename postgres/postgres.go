@@ -29,25 +29,26 @@ import (
 )
 
 const (
-	msgQuery           = 'Q'
-	msgParse           = 'P'
-	msgBind            = 'B'
-	msgExecute         = 'E'
-	msgDescribe        = 'D'
-	msgSync            = 'S'
-	msgTerminate       = 'X'
-	msgReadyForQuery   = 'Z'
-	msgCommandComplete = 'C'
-	msgRowDescription  = 'T'
-	msgDataRow         = 'D'
-	msgErrorResponse   = 'E'
-	msgAuthentication  = 'R'
-	msgParameterStatus = 'S'
-	msgBackendKeyData  = 'K'
-	msgParseComplete   = '1'
-	msgBindComplete    = '2'
-	msgCloseComplete   = '3'
-	msgNoData          = 'n'
+	msgQuery                = 'Q'
+	msgParse                = 'P'
+	msgBind                 = 'B'
+	msgExecute              = 'E'
+	msgDescribe             = 'D'
+	msgSync                 = 'S'
+	msgTerminate            = 'X'
+	msgReadyForQuery        = 'Z'
+	msgCommandComplete      = 'C'
+	msgRowDescription       = 'T'
+	msgDataRow              = 'D'
+	msgErrorResponse        = 'E'
+	msgAuthentication       = 'R'
+	msgParameterStatus      = 'S'
+	msgBackendKeyData       = 'K'
+	msgParseComplete        = '1'
+	msgBindComplete         = '2'
+	msgCloseComplete        = '3'
+	msgNoData               = 'n'
+	msgParameterDescription = 't'
 )
 
 var connCounter uint32
@@ -421,8 +422,10 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32, state
 			}
 		case msgDescribe:
 			log.Printf("[PostgreSQL] Describe message received (conn %d)", connID)
-			// Send NoData (we don't fully support describe yet)
-			p.writeMessage(client, msgNoData, []byte{})
+			if err := p.handleDescribe(payload, client, state); err != nil {
+				log.Printf("[PostgreSQL] Describe error (conn %d): %v", connID, err)
+				p.sendError(client, "42000", err.Error())
+			}
 		case msgExecute:
 			log.Printf("[PostgreSQL] Execute message received (conn %d)", connID)
 			if err := p.handleExecute(payload, client, db, connID, state); err != nil {
@@ -795,6 +798,75 @@ func (p *Proxy) handleParse(payload []byte, client net.Conn, state *connState) e
 	return p.writeMessage(client, msgParseComplete, []byte{})
 }
 
+// handleDescribe handles the Describe message
+// Describe message format: 'S' or 'P' + name\0
+// 'S' = describe Statement, 'P' = describe Portal
+func (p *Proxy) handleDescribe(payload []byte, client net.Conn, state *connState) error {
+	if len(payload) < 2 {
+		return fmt.Errorf("malformed Describe message: too short")
+	}
+
+	descType := payload[0] // 'S' for statement, 'P' for portal
+	nameEnd := bytes.IndexByte(payload[1:], 0)
+	if nameEnd < 0 {
+		return fmt.Errorf("malformed Describe message: no name terminator")
+	}
+	name := string(payload[1 : 1+nameEnd])
+
+	log.Printf("[PostgreSQL] handleDescribe: type=%c, name=%q", descType, name)
+
+	if descType == 'S' {
+		// Describe Statement - need to send ParameterDescription and RowDescription (or NoData)
+		query, ok := state.preparedStatements[name]
+		if !ok {
+			return fmt.Errorf("unknown prepared statement: %s", name)
+		}
+
+		// Count parameters ($1, $2, etc.) in the query
+		numParams := countPostgresParams(query)
+		log.Printf("[PostgreSQL] handleDescribe: query=%q, numParams=%d", query, numParams)
+
+		// Send ParameterDescription message
+		// Format: int16 (num params) + int32[] (parameter OIDs, 0 = unknown)
+		paramDesc := make([]byte, 2+numParams*4)
+		binary.BigEndian.PutUint16(paramDesc[0:2], uint16(numParams))
+		// Leave OIDs as 0 (unknown type) - PostgreSQL will infer from context
+		if err := p.writeMessage(client, msgParameterDescription, paramDesc); err != nil {
+			return err
+		}
+
+		// For non-SELECT queries (INSERT, UPDATE, DELETE), send NoData
+		// For SELECT queries, we'd need to send RowDescription
+		// For simplicity, always send NoData for now
+		return p.writeMessage(client, msgNoData, []byte{})
+	} else if descType == 'P' {
+		// Describe Portal - we just send NoData for non-SELECT portals
+		return p.writeMessage(client, msgNoData, []byte{})
+	}
+
+	return fmt.Errorf("unknown describe type: %c", descType)
+}
+
+// countPostgresParams counts $1, $2, etc. placeholders in a query
+func countPostgresParams(query string) int {
+	maxParam := 0
+	for i := 0; i < len(query)-1; i++ {
+		if query[i] == '$' && query[i+1] >= '0' && query[i+1] <= '9' {
+			// Parse the number after $
+			j := i + 1
+			for j < len(query) && query[j] >= '0' && query[j] <= '9' {
+				j++
+			}
+			if num, err := strconv.Atoi(query[i+1 : j]); err == nil {
+				if num > maxParam {
+					maxParam = num
+				}
+			}
+		}
+	}
+	return maxParam
+}
+
 // handleBind handles the Bind message (bind parameters to a prepared statement)
 // Bind message format: portal_name\0 + stmt_name\0 + format_codes + num_params + param_values + result_format_codes
 func (p *Proxy) handleBind(payload []byte, client net.Conn, state *connState) error {
@@ -964,13 +1036,16 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 
 	// Check if write batching should be used
 	if state.writeBatch != nil && !state.inTransaction && parsed.IsWritable() && parsed.IsBatchable() {
-		// Use write batching
+		// Use write batching - execute via db.Exec() which handles its own prepared statements
 		batchKey := parsed.GetBatchKey()
 		batchMs := parsed.BatchMs
 
-		log.Printf("[PostgreSQL] Batching write: key=%q, batchMs=%d", batchKey, batchMs)
+		log.Printf("[PostgreSQL] WRITEBATCH ROUTE: original query=%q, parsed.Query=%q, batchKey=%q, batchMs=%d, numParams=%d, params=%v",
+			query, parsed.Query, batchKey, batchMs, len(params), params)
 
 		// Enqueue the write (blocks until result is available)
+		// The writebatch executor will call db.Exec(parsed.Query, params...)
+		// which creates its own prepared statement on the backend
 		ctx := context.Background()
 		result := state.writeBatch.Enqueue(ctx, batchKey, parsed.Query, params, batchMs)
 
@@ -979,32 +1054,27 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 		metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
 
 		if result.Error != nil {
-			// Handle batching-specific errors
-			if result.Error == writebatch.ErrManagerClosed || result.Error == writebatch.ErrTimeout {
-				log.Printf("[PostgreSQL] Batching unavailable, falling back to direct execution")
-				// Fall through to direct execution
-			} else {
-				return result.Error
-			}
-		} else {
-			// Success - send result to client
-			var response bytes.Buffer
-
-			// For non-SELECT queries, send CommandComplete
-			cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 %d", result.AffectedRows)), 0)
-			response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
-
-			// Send response to client
-			if _, err := client.Write(response.Bytes()); err != nil {
-				log.Printf("[PostgreSQL] Client write error: %v", err)
-				return err
-			}
-
-			return nil
+			return result.Error
 		}
+
+		// Success - send result to client
+		var response bytes.Buffer
+
+		// For non-SELECT queries, send CommandComplete
+		cmdPayload := append([]byte(fmt.Sprintf("INSERT 0 %d", result.AffectedRows)), 0)
+		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+
+		// Send response to client
+		if _, err := client.Write(response.Bytes()); err != nil {
+			log.Printf("[PostgreSQL] Client write error: %v", err)
+			return err
+		}
+
+		return nil
 	}
 
-	// Execute the query with parameters
+	// Non-batched execution: use direct query execution
+	// This also handles the case where batching is disabled or fails
 	var response bytes.Buffer
 
 	// Select backend

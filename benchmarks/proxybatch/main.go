@@ -23,8 +23,6 @@ type BenchmarkResult struct {
 }
 
 func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, dsn string) BenchmarkResult {
-	log.Printf("Testing %s at %dk ops/sec...", dbType, targetOpsPerSec/1000)
-
 	db, err := sql.Open(dbType, dsn)
 	if err != nil {
 		log.Fatal(err)
@@ -72,27 +70,20 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 	// Configure write batch manager with hint-based batching
 	// Different batch windows based on target rate
 	var batchMs int
-	var label string
 
 	if targetOpsPerSec <= 1_000 {
 		// Baseline: no batching
 		batchMs = 0
-		label = "baseline"
 	} else if targetOpsPerSec <= 10_000 {
 		// Low rate: use 1ms batching window
 		batchMs = 1
-		label = "1ms batch"
 	} else if targetOpsPerSec <= 100_000 {
 		// Medium rate: use 10ms batching window
 		batchMs = 10
-		label = "10ms batch"
 	} else {
 		// High rate: use 100ms batching window
 		batchMs = 100
-		label = "100ms batch"
 	}
-
-	log.Printf("  Using %s (batch:%d)", label, batchMs)
 
 	// Track operations and latencies
 	var totalOps atomic.Int64
@@ -141,8 +132,7 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 			for time.Now().Before(endTime) {
 				reqStart := time.Now()
 
-				// Use parameterized queries to enable batching
-				// The proxy can batch identical queries with different parameters
+				// Use parameterized queries for both databases
 				_, err := db.Exec(insertQuery, workerID, time.Now().UnixNano())
 
 				if err == nil {
@@ -191,7 +181,6 @@ func generateBarChart(results []BenchmarkResult, dbType string) {
 			r.ActualOpsPerSec/1000,
 			r.AvgLatencyMs)
 	}
-	log.Printf("Generated: %s", filename)
 }
 
 func generateGnuplotScript() {
@@ -233,7 +222,6 @@ unset multiplot
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("Generated: plot_bars.gnu")
 }
 
 func main() {
@@ -252,7 +240,6 @@ func main() {
 		log.Fatal("Could not start CPU profile: ", err)
 	}
 	defer pprof.StopCPUProfile()
-	log.Println("CPU profiling enabled -> cpu.prof")
 
 	// Test rates with different batching hints
 	targets := []int{1_000, 10_000, 100_000, 1_000_000}
@@ -285,7 +272,6 @@ func main() {
 	}
 
 	// Generate output files
-	log.Println("\n=== Generating output files ===")
 	generateBarChart(pgResults, "postgres")
 	generateBarChart(mysqlResults, "mysql")
 	generateGnuplotScript()
@@ -310,8 +296,6 @@ func main() {
 		defer memFile.Close()
 		if err := pprof.WriteHeapProfile(memFile); err != nil {
 			log.Printf("Could not write memory profile: %v", err)
-		} else {
-			log.Println("\nMemory profile written -> mem.prof")
 		}
 	}
 

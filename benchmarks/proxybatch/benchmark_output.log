@@ -1,0 +1,51 @@
+2026/02/18 14:18:19 Proxy Write Batching Throughput & Latency Benchmark
+2026/02/18 14:18:19 ====================================================
+2026/02/18 14:18:19 Testing batching hint performance via proxy (3s each)
+2026/02/18 14:18:19 
+2026/02/18 14:18:19 CPU profiling enabled -> cpu.prof
+2026/02/18 14:18:19 === PostgreSQL Tests (via Proxy) ===
+2026/02/18 14:18:19 Testing postgres at 1k ops/sec...
+2026/02/18 14:18:19   Using baseline (batch:0)
+2026/02/18 14:18:22   1k target -> 21960 ops/sec actual, 4.55 ms latency (1.0x speedup)
+2026/02/18 14:18:23 Testing postgres at 10k ops/sec...
+2026/02/18 14:18:23   Using 1ms batch (batch:1)
+2026/02/18 14:18:26   10k target -> 18219 ops/sec actual, 5.48 ms latency (0.8x speedup)
+2026/02/18 14:18:27 Testing postgres at 100k ops/sec...
+2026/02/18 14:18:27   Using 10ms batch (batch:10)
+2026/02/18 14:18:30   100k target -> 16212 ops/sec actual, 61.00 ms latency (0.7x speedup)
+2026/02/18 14:18:31 Testing postgres at 1000k ops/sec...
+2026/02/18 14:18:31   Using 100ms batch (batch:100)
+2026/02/18 14:18:35   1000k target -> 4685 ops/sec actual, 920.00 ms latency (0.2x speedup)
+2026/02/18 14:18:36 
+=== MariaDB Tests (via Proxy) ===
+2026/02/18 14:18:36 Testing mysql at 1k ops/sec...
+2026/02/18 14:18:36   Using baseline (batch:0)
+2026/02/18 14:18:39   1k target -> 37723 ops/sec actual, 2.65 ms latency (1.0x speedup)
+2026/02/18 14:18:40 Testing mysql at 10k ops/sec...
+2026/02/18 14:18:40   Using 1ms batch (batch:1)
+2026/02/18 14:18:43   10k target -> 36713 ops/sec actual, 2.72 ms latency (1.0x speedup)
+2026/02/18 14:18:44 Testing mysql at 100k ops/sec...
+2026/02/18 14:18:44   Using 10ms batch (batch:10)
+2026/02/18 14:18:47   100k target -> 46577 ops/sec actual, 21.38 ms latency (1.2x speedup)
+2026/02/18 14:18:48 Testing mysql at 1000k ops/sec...
+2026/02/18 14:18:48   Using 100ms batch (batch:100)
+2026/02/18 14:18:52   1000k target -> 40762 ops/sec actual, 119.92 ms latency (1.1x speedup)
+2026/02/18 14:18:53 
+=== Generating output files ===
+2026/02/18 14:18:53 Generated: bars_postgres.dat
+2026/02/18 14:18:53 Generated: bars_mysql.dat
+2026/02/18 14:18:53 Generated: plot_bars.gnu
+2026/02/18 14:18:53 
+=== Summary ===
+2026/02/18 14:18:53 PostgreSQL: 21960 → 4685 ops/sec (0.2x speedup)
+2026/02/18 14:18:53 MariaDB: 37723 → 40762 ops/sec (1.1x speedup)
+2026/02/18 14:18:53 
+To generate graph, run:
+2026/02/18 14:18:53   gnuplot plot_bars.gnu
+2026/02/18 14:18:53   (creates proxybatch_performance.png)
+2026/02/18 14:18:53 
+Memory profile written -> mem.prof
+2026/02/18 14:18:53 
+To analyze profiles:
+2026/02/18 14:18:53   go tool pprof cpu.prof
+2026/02/18 14:18:53   go tool pprof mem.prof

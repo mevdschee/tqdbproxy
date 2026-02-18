@@ -3,6 +3,7 @@ package writebatch
 import (
 	"context"
 	"database/sql"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,12 +28,15 @@ func New(db *sql.DB, config Config) *Manager {
 // Enqueue adds a write operation to the batch queue and waits for its result
 // batchMs is the maximum wait time in milliseconds (0 = execute immediately)
 func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int) WriteResult {
+	log.Printf("[WriteBatch] Enqueue called: query=%q, numParams=%d, batchMs=%d", query, len(params), batchMs)
+
 	if m.closed.Load() {
 		return WriteResult{Error: ErrManagerClosed}
 	}
 
 	// If no wait time specified, execute immediately (no batching)
 	if batchMs == 0 {
+		log.Printf("[WriteBatch] Executing immediately (batchMs=0)")
 		return m.executeImmediate(ctx, query, params)
 	}
 
@@ -101,8 +105,10 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 
 // executeImmediate executes a query immediately without batching
 func (m *Manager) executeImmediate(ctx context.Context, query string, params []interface{}) WriteResult {
+	log.Printf("[WriteBatch] executeImmediate: query=%q, params=%v", query, params)
 	result, err := m.db.ExecContext(ctx, query, params...)
 	if err != nil {
+		log.Printf("[WriteBatch] executeImmediate ERROR: %v", err)
 		return WriteResult{Error: err}
 	}
 
