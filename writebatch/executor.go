@@ -1,6 +1,8 @@
 package writebatch
 
 import (
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mevdschee/tqdbproxy/metrics"
@@ -128,6 +130,143 @@ func (m *Manager) executeBatchedWrites(requests []*WriteRequest) {
 
 // executePreparedBatch executes identical queries using a prepared statement
 func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
+	// Check if this is an INSERT statement that can be batched
+	firstQuery := requests[0].Query
+	if isBatchableInsert(firstQuery) && len(requests) > 1 {
+		m.executeTrueBatchedInsert(requests)
+		return
+	}
+
+	// Fallback: execute individually with prepared statement
+	stmt, err := m.db.Prepare(firstQuery)
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+	defer stmt.Close()
+
+	for _, req := range requests {
+		result, err := stmt.Exec(req.Params...)
+		if err != nil {
+			req.ResultChan <- WriteResult{Error: err}
+			continue
+		}
+
+		affected, _ := result.RowsAffected()
+		lastID, _ := result.LastInsertId()
+		req.ResultChan <- WriteResult{
+			AffectedRows: affected,
+			LastInsertID: lastID,
+		}
+	}
+}
+
+// isBatchableInsert checks if query is a simple INSERT that can be batched
+func isBatchableInsert(query string) bool {
+	// Simple check for INSERT INTO ... VALUES pattern
+	return len(query) > 12 &&
+		(query[0:6] == "INSERT" || query[0:6] == "insert") &&
+		(query[len(query)-1] == ')' || query[len(query)-1] == ' ')
+}
+
+// executeTrueBatchedInsert combines multiple INSERTs into one multi-value INSERT
+func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
+	firstQuery := requests[0].Query
+
+	// Find the VALUES clause
+	valuesIdx := -1
+	for i := 0; i < len(firstQuery)-6; i++ {
+		if firstQuery[i:i+6] == "VALUES" || firstQuery[i:i+6] == "values" {
+			valuesIdx = i + 6
+			break
+		}
+	}
+
+	if valuesIdx == -1 {
+		// Fallback if we can't parse
+		m.executePreparedBatchFallback(requests)
+		return
+	}
+
+	// Build multi-value INSERT
+	baseQuery := firstQuery[:valuesIdx]
+	numParams := len(requests[0].Params)
+
+	// Detect if using PostgreSQL placeholders ($1) or MySQL/SQLite placeholders (?)
+	isPostgres := len(firstQuery) > 0 && containsPostgresPlaceholder(firstQuery)
+
+	// Pre-allocate allParams slice to avoid reallocations
+	totalParams := len(requests) * numParams
+	allParams := make([]interface{}, 0, totalParams)
+
+	// Use strings.Builder for efficient string concatenation
+	var builder strings.Builder
+	// Pre-allocate buffer: baseQuery + estimated size for value clauses
+	estimatedSize := len(baseQuery) + len(requests)*(numParams*4+3) // rough estimate
+	builder.Grow(estimatedSize)
+
+	builder.WriteString(baseQuery)
+	builder.WriteString(" ")
+
+	paramIndex := 1
+	for reqIdx, req := range requests {
+		if reqIdx > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString("(")
+
+		for i := 0; i < numParams; i++ {
+			if i > 0 {
+				builder.WriteString(",")
+			}
+			if isPostgres {
+				builder.WriteString("$")
+				builder.WriteString(strconv.Itoa(paramIndex))
+				paramIndex++
+			} else {
+				builder.WriteString("?")
+			}
+		}
+		builder.WriteString(")")
+		allParams = append(allParams, req.Params...)
+	}
+
+	// Execute batched query
+	batchQuery := builder.String()
+	result, err := m.db.Exec(batchQuery, allParams...)
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	_, _ = result.RowsAffected()
+	firstID, _ := result.LastInsertId()
+
+	// Send results to all requests
+	for i, req := range requests {
+		req.ResultChan <- WriteResult{
+			AffectedRows: 1, // Each request affects 1 row
+			LastInsertID: firstID + int64(i),
+		}
+	}
+}
+
+// containsPostgresPlaceholder checks if query uses PostgreSQL $1 syntax
+func containsPostgresPlaceholder(query string) bool {
+	for i := 0; i < len(query)-1; i++ {
+		if query[i] == '$' && query[i+1] >= '0' && query[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// executePreparedBatchFallback is the original implementation
+func (m *Manager) executePreparedBatchFallback(requests []*WriteRequest) {
 	stmt, err := m.db.Prepare(requests[0].Query)
 	if err != nil {
 		for _, req := range requests {

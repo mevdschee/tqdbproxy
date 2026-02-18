@@ -7,6 +7,7 @@ toolchain go1.24.12
 replace github.com/mevdschee/tqdbproxy => ../..
 
 require (
+	github.com/lib/pq v1.11.2
 	github.com/mattn/go-sqlite3 v1.14.34
 	github.com/mevdschee/tqdbproxy v0.0.0-00010101000000-000000000000
 )

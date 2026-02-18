@@ -1,60 +1,60 @@
 Adaptive Write Batching Benchmark Results
 ==========================================
 
-Date: 2026-02-18 01:26:31
+Date: 2026-02-18 08:33:53
 
 Target Load: 1.0k ops/sec
-  Duration:         10.201041776s
-  Total Operations: 9.9k
-  Actual Throughput: 970 ops/sec (97.0% of target)
-  Average Delay:    3.12 ms
-  Final Delay:      1.00 ms
+  Duration:         10.279126756s
+  Total Operations: 450.0k
+  Actual Throughput: 43.8k ops/sec (4377.8% of target)
+  Average Delay:    35.27 ms
+  Final Delay:      100.00 ms
   Delay Analysis:
     Initial:  10.00 ms
-    Mid-run:  1.32 ms
-    Final:    1.00 ms
-    Change:   -9.00 ms (decreased - low load)
+    Mid-run:  22.50 ms
+    Final:    100.00 ms
+    Change:   +90.00 ms (increased - high load)
 
 Target Load: 10.0k ops/sec
-  Duration:         10.222157814s
-  Total Operations: 47.2k
-  Actual Throughput: 4.6k ops/sec (46.2% of target)
-  Average Delay:    26.27 ms
-  Final Delay:      33.75 ms
+  Duration:         10.235164961s
+  Total Operations: 450.0k
+  Actual Throughput: 44.0k ops/sec (439.7% of target)
+  Average Delay:    34.75 ms
+  Final Delay:      100.00 ms
   Delay Analysis:
     Initial:  10.00 ms
-    Mid-run:  33.75 ms
-    Final:    33.75 ms
-    Change:   +23.75 ms (increased - high load)
+    Mid-run:  22.50 ms
+    Final:    100.00 ms
+    Change:   +90.00 ms (increased - high load)
 
 Target Load: 100.0k ops/sec
-  Duration:         10.211545276s
-  Total Operations: 58.2k
-  Actual Throughput: 5.7k ops/sec (5.7% of target)
-  Average Delay:    23.73 ms
-  Final Delay:      33.74 ms
+  Duration:         10.308049357s
+  Total Operations: 7.0M
+  Actual Throughput: 675.2k ops/sec (675.2% of target)
+  Average Delay:    44.89 ms
+  Final Delay:      100.00 ms
   Delay Analysis:
     Initial:  10.00 ms
     Mid-run:  33.74 ms
-    Final:    33.74 ms
-    Change:   +23.74 ms (increased - high load)
+    Final:    100.00 ms
+    Change:   +90.00 ms (increased - high load)
 
 Target Load: 1.0M ops/sec
-  Duration:         10.20441093s
-  Total Operations: 40.6k
-  Actual Throughput: 4.0k ops/sec (0.4% of target)
-  Average Delay:    28.71 ms
-  Final Delay:      33.75 ms
+  Duration:         10.302203924s
+  Total Operations: 7.0M
+  Actual Throughput: 678.9k ops/sec (67.9% of target)
+  Average Delay:    62.75 ms
+  Final Delay:      100.00 ms
   Delay Analysis:
     Initial:  10.00 ms
-    Mid-run:  33.75 ms
-    Final:    33.75 ms
-    Change:   +23.75 ms (increased - high load)
+    Mid-run:  75.94 ms
+    Final:    100.00 ms
+    Change:   +90.00 ms (increased - high load)
 
 Key Insights:
 =============
 
-1. Delay Range: 3.12 ms to 28.71 ms
+1. Delay Range: 34.75 ms to 62.75 ms
    - Lower delays at lower throughput (more responsive)
    - Higher delays at higher throughput (more batching)
 
@@ -64,7 +64,7 @@ Key Insights:
    - Responds to changes in real-time
 
 3. Recommendations:
-   - Low load (1.0k ops/s): Use min delay ~3ms for responsiveness
-   - Low load (10.0k ops/s): Use min delay ~26ms for responsiveness
-   - High load (100.0k ops/s): Use max delay ~24ms for throughput
-   - High load (1.0M ops/s): Use max delay ~29ms for throughput
+   - Low load (1.0k ops/s): Use min delay ~35ms for responsiveness
+   - Low load (10.0k ops/s): Use min delay ~35ms for responsiveness
+   - High load (100.0k ops/s): Use max delay ~45ms for throughput
+   - High load (1.0M ops/s): Use max delay ~63ms for throughput

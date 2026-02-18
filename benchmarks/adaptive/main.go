@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mevdschee/tqdbproxy/writebatch"
 )
@@ -31,19 +34,44 @@ type BenchmarkResult struct {
 	FinalDelay      float64
 }
 
-func runBenchmark(targetOpsPerSec int, duration time.Duration) BenchmarkResult {
+func runBenchmark(targetOpsPerSec int, duration time.Duration, usePostgres bool) BenchmarkResult {
 	log.Printf("=== Starting benchmark: %d ops/sec for %v ===", targetOpsPerSec, duration)
 
-	// Create in-memory database
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
+	var db *sql.DB
+	var err error
 
-	_, err = db.Exec("CREATE TABLE test (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT, created_at INTEGER)")
-	if err != nil {
-		log.Fatal(err)
+	if usePostgres {
+		// Connect to PostgreSQL
+		db, err = sql.Open("postgres", "host=127.0.0.1 port=5432 user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
+
+		// Drop and recreate table for clean test
+		db.Exec("DROP TABLE IF EXISTS test")
+		_, err = db.Exec("CREATE TABLE test (id SERIAL PRIMARY KEY, value INTEGER, created_at BIGINT)")
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		// Create SQLite in-memory database
+		db, err = sql.Open("sqlite3", "file:test.db?cache=shared&mode=memory")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
+
+		_, err = db.Exec("CREATE TABLE test (id INTEGER PRIMARY KEY AUTOINCREMENT, value INTEGER, created_at INTEGER)")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Optimize SQLite for performance
+		db.Exec("PRAGMA journal_mode=WAL")
+		db.Exec("PRAGMA synchronous=NORMAL")
+		db.Exec("PRAGMA cache_size=10000")
+		db.Exec("PRAGMA temp_store=MEMORY")
 	}
 
 	// Configure write batch manager with adaptive settings
@@ -104,39 +132,69 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration) BenchmarkResult {
 	startTime := time.Now()
 	endTime := startTime.Add(duration)
 
-	// Calculate operations per worker
-	numWorkers := 100
+	// Use massive concurrency to saturate the system
+	numWorkers := 50000
+
 	opsPerWorker := targetOpsPerSec / numWorkers
 	if opsPerWorker < 1 {
 		opsPerWorker = 1
-		numWorkers = targetOpsPerSec
 	}
-	interval := time.Second / time.Duration(opsPerWorker)
-	if interval < time.Microsecond {
-		interval = time.Microsecond
+
+	// Pre-allocate reusable context to reduce allocation overhead
+	bgCtx := context.Background()
+
+	// Choose query based on database backend
+	var insertQuery string
+	if usePostgres {
+		insertQuery = "INSERT INTO test (value, created_at) VALUES ($1, $2)"
+	} else {
+		insertQuery = "INSERT INTO test (value, created_at) VALUES (?, ?)"
 	}
 
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
 
-			for {
-				select {
-				case <-ticker.C:
-					if time.Now().After(endTime) {
-						return
-					}
+			// Pre-allocate and reuse to reduce GC pressure
+			query := insertQuery
+			batchKey := "INSERT"
+			params := []interface{}{workerID, int64(0)}
 
-					query := "INSERT INTO test (value, created_at) VALUES (?, ?)"
-					batchKey := "INSERT"
-					result := manager.Enqueue(context.Background(), batchKey, query,
-						[]interface{}{fmt.Sprintf("worker%d", workerID), time.Now().Unix()})
+			// For high loads, use tight loop instead of ticker
+			if targetOpsPerSec >= 50000 {
+				// Maximum throughput mode - continuous loop with pre-allocated params
+				for time.Now().Before(endTime) {
+					params[1] = time.Now().Unix()
+					result := manager.Enqueue(bgCtx, batchKey, query, params)
 
 					if result.Error == nil {
 						totalOps.Add(1)
+					}
+				}
+			} else {
+				// Controlled rate mode with ticker
+				interval := time.Second / time.Duration(opsPerWorker)
+				if interval < time.Microsecond {
+					interval = time.Microsecond
+				}
+
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-ticker.C:
+						if time.Now().After(endTime) {
+							return
+						}
+
+						params[1] = time.Now().Unix()
+						result := manager.Enqueue(bgCtx, batchKey, query, params)
+
+						if result.Error == nil {
+							totalOps.Add(1)
+						}
 					}
 				}
 			}
@@ -175,15 +233,38 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration) BenchmarkResult {
 }
 
 func main() {
+	usePostgres := flag.Bool("postgres", false, "Use PostgreSQL instead of SQLite")
+	flag.Parse()
+
+	backend := "SQLite"
+	if *usePostgres {
+		backend = "PostgreSQL"
+	}
+
+	// Start CPU profiling
+	cpuProfile, err := os.Create("adaptive_cpu.prof")
+	if err != nil {
+		log.Fatal("Could not create CPU profile: ", err)
+	}
+	defer cpuProfile.Close()
+
+	if err := pprof.StartCPUProfile(cpuProfile); err != nil {
+		log.Fatal("Could not start CPU profile: ", err)
+	}
+	defer pprof.StopCPUProfile()
+
 	log.Println("Adaptive Write Batching Benchmark")
 	log.Println("==================================")
+	log.Printf("Backend: %s\n", backend)
+	log.Println("CPU profiling enabled -> adaptive_cpu.prof")
+	log.Println()
 
 	targets := []int{1_000, 10_000, 100_000, 1_000_000}
 	duration := 10 * time.Second
 	var results []BenchmarkResult
 
 	for _, target := range targets {
-		result := runBenchmark(target, duration)
+		result := runBenchmark(target, duration, *usePostgres)
 		results = append(results, result)
 
 		// Cooldown between tests

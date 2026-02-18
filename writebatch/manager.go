@@ -47,11 +47,16 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 	}
 
 	// Get or create batch group
-	groupInterface, _ := m.groups.LoadOrStore(batchKey, &BatchGroup{
-		BatchKey:  batchKey,
-		Requests:  make([]*WriteRequest, 0, m.config.MaxBatchSize),
-		FirstSeen: time.Now(),
-	})
+	groupInterface, loaded := m.groups.Load(batchKey)
+	if !loaded {
+		// Group doesn't exist, create it
+		newGroup := &BatchGroup{
+			BatchKey:  batchKey,
+			Requests:  make([]*WriteRequest, 0, m.config.MaxBatchSize),
+			FirstSeen: time.Now(),
+		}
+		groupInterface, loaded = m.groups.LoadOrStore(batchKey, newGroup)
+	}
 	group := groupInterface.(*BatchGroup)
 
 	group.mu.Lock()

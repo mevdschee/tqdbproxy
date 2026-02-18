@@ -1,0 +1,23 @@
+2026/02/18 07:48:30 Adaptive Write Batching Benchmark
+2026/02/18 07:48:30 ==================================
+2026/02/18 07:48:30 === Starting benchmark: 1000 ops/sec for 10s ===
+2026/02/18 07:48:41 Completed: 9447 ops in 10.20093705s (926 ops/sec actual), Avg Delay: 3.0ms, Final Delay: 1.0ms
+2026/02/18 07:48:43 === Starting benchmark: 10000 ops/sec for 10s ===
+2026/02/18 07:48:53 Completed: 76000 ops in 10.254872355s (7411 ops/sec actual), Avg Delay: 61.7ms, Final Delay: 100.0ms
+2026/02/18 07:48:55 === Starting benchmark: 100000 ops/sec for 10s ===
+2026/02/18 07:49:06 Completed: 4425 ops in 10.301196045s (430 ops/sec actual), Avg Delay: 62.5ms, Final Delay: 100.0ms
+2026/02/18 07:49:08 === Starting benchmark: 1000000 ops/sec for 10s ===
+2026/02/18 07:49:18 Completed: 4313 ops in 10.290324366s (419 ops/sec actual), Avg Delay: 61.9ms, Final Delay: 100.0ms
+2026/02/18 07:49:20 Generated: adaptive_data.csv
+2026/02/18 07:49:20 Generated: adaptive_plot.gnu
+2026/02/18 07:49:20 Generated: adaptive_summary.txt
+2026/02/18 07:49:20 
+=== Benchmark Complete ===
+2026/02/18 07:49:20 Generated files:
+2026/02/18 07:49:20   - adaptive_data.csv (raw data)
+2026/02/18 07:49:20   - adaptive_plot.gnu (gnuplot script)
+2026/02/18 07:49:20   - adaptive_summary.txt (results summary)
+2026/02/18 07:49:20 
+To generate graph, run:
+2026/02/18 07:49:20   gnuplot adaptive_plot.gnu
+2026/02/18 07:49:20   (creates adaptive_benchmark.png)
