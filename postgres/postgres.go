@@ -138,7 +138,16 @@ func (p *Proxy) Start() error {
 
 	// Connect to backend PostgreSQL for write batch manager
 	addr := defaultPool.GetPrimary()
-	dsn := fmt.Sprintf("host=%s user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable", addr)
+
+	// Parse host and port from address
+	host := addr
+	port := "5432" // default PostgreSQL port
+	if colonIdx := strings.LastIndex(addr, ":"); colonIdx != -1 {
+		host = addr[:colonIdx]
+		port = addr[colonIdx+1:]
+	}
+
+	dsn := fmt.Sprintf("host=%s port=%s user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable", host, port)
 	if len(addr) > 5 && addr[:5] == "unix:" {
 		dsn = fmt.Sprintf("host=%s user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable", addr[5:])
 	}
