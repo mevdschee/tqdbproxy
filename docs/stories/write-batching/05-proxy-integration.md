@@ -10,7 +10,6 @@
 
 ## Overview
 
-
 Integrate write batching into the MariaDB and PostgreSQL proxy handlers with
 transaction state tracking.
 
@@ -33,8 +32,8 @@ transaction state tracking.
 
 ### Configuration Support
 
-
 Added `WriteBatchConfig` to `config/config.go`:
+
 - Enabled flag
 - Delay parameters (initial, min, max in milliseconds)
 - Batch size limit
@@ -42,7 +41,7 @@ Added `WriteBatchConfig` to `config/config.go`:
 - Metrics interval
 
 Configuration is loaded from INI file with keys like:
-- `writebatch_enabled`
+
 - `writebatch_initial_delay_ms`
 - `writebatch_max_delay_ms`
 - etc.
@@ -77,20 +76,25 @@ Configuration is loaded from INI file with keys like:
    - Otherwise use normal execution path
 
 7. **Implemented Write Handlers**:
-   - `handleBatchedWrite()`: Parse query, get batch key, enqueue to manager, send OK packet with results
+   - `handleBatchedWrite()`: Parse query, get batch key, enqueue to manager,
+     send OK packet with results
    - `executeImmediateWrite()`: Fallback for when batching fails
-   - `writeOKWithRowsAndID()`: Send OK packet with affected rows and last insert ID
+   - `writeOKWithRowsAndID()`: Send OK packet with affected rows and last insert
+     ID
 
 ### Integration Tests
 
 **Created**: `mariadb/writebatch_test.go`
 
 Tests include:
-- `TestWriteBatchIntegration`: Full integration test with concurrent writes, transactions
+
+- `TestWriteBatchIntegration`: Full integration test with concurrent writes,
+  transactions
 - `TestWriteBatchManagerLifecycle`: Verify manager initialization and cleanup
 - `TestWriteBatchAdaptiveDelay`: Config flow verification
 
-Note: Integration tests are skipped by default (require running MariaDB backend).
+Note: Integration tests are skipped by default (require running MariaDB
+backend).
 
 ## Tasks
 
@@ -177,17 +181,16 @@ func NewProxy(cfg *config.Config) (*Proxy, error) {
         // ... existing fields
     }
     
-    // Initialize write batch manager if enabled
-    if cfg.WriteBatch.Enabled {
-        wbConfig := writebatch.Config{
-            InitialDelayMs:  cfg.WriteBatch.InitialDelayMs,
-            MaxDelayMs:      cfg.WriteBatch.MaxDelayMs,
-            MinDelayMs:      cfg.WriteBatch.MinDelayMs,
-            MaxBatchSize:    cfg.WriteBatch.MaxBatchSize,
-            WriteThreshold:  cfg.WriteBatch.WriteThreshold,
-            AdaptiveStep:    cfg.WriteBatch.AdaptiveStep,
-            MetricsInterval: cfg.WriteBatch.MetricsInterval,
-        }
+    // Initialize write batch manager
+    wbConfig := writebatch.Config{
+        InitialDelayMs:  cfg.WriteBatch.InitialDelayMs,
+        MaxDelayMs:      cfg.WriteBatch.MaxDelayMs,
+        MinDelayMs:      cfg.WriteBatch.MinDelayMs,
+        MaxBatchSize:    cfg.WriteBatch.MaxBatchSize,
+        WriteThreshold:  cfg.WriteBatch.WriteThreshold,
+        AdaptiveStep:    cfg.WriteBatch.AdaptiveStep,
+        MetricsInterval: cfg.WriteBatch.MetricsInterval,
+    }
         
         // Use primary database connection for writes
         p.writeBatch = writebatch.New(p.primaryDB, wbConfig)

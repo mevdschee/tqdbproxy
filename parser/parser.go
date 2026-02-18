@@ -80,11 +80,9 @@ func Parse(query string) *ParsedQuery {
 		}
 		if matches[8] != "" {
 			batchMs, _ := strconv.Atoi(matches[8])
-			// Cap at 100ms and reject negative values
+			// Reject negative values
 			if batchMs < 0 {
 				batchMs = 0
-			} else if batchMs > 100 {
-				batchMs = 100
 			}
 			p.BatchMs = batchMs
 		}
@@ -118,7 +116,8 @@ func (p *ParsedQuery) IsWritable() bool {
 // WHERE clauses and cannot be combined into multi-value statements
 // Note: Transaction state is tracked at connection level
 func (p *ParsedQuery) IsBatchable() bool {
-	return p.Type == QueryInsert
+	// A query is batchable if it's an INSERT and has a batch hint
+	return p.Type == QueryInsert && p.BatchMs > 0
 }
 
 // GetBatchKey returns a key for grouping writes for batching

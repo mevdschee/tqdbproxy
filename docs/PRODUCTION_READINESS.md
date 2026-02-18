@@ -135,7 +135,6 @@
 ### Production Settings
 
 ```ini
-writebatch_enabled = true
 writebatch_initial_delay_ms = 10
 writebatch_max_delay_ms = 100
 writebatch_min_delay_ms = 1
@@ -148,7 +147,6 @@ writebatch_metrics_interval = 60
 ### High-Throughput Settings
 
 ```ini
-writebatch_enabled = true
 writebatch_initial_delay_ms = 5
 writebatch_max_delay_ms = 50
 writebatch_min_delay_ms = 1
@@ -161,7 +159,6 @@ writebatch_metrics_interval = 30
 ### Low-Latency Settings
 
 ```ini
-writebatch_enabled = true
 writebatch_initial_delay_ms = 1
 writebatch_max_delay_ms = 10
 writebatch_min_delay_ms = 1

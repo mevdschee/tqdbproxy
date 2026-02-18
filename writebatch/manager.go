@@ -27,7 +27,7 @@ func New(db *sql.DB, config Config) *Manager {
 
 // Enqueue adds a write operation to the batch queue and waits for its result
 // batchMs is the maximum wait time in milliseconds (0 = execute immediately)
-func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int) WriteResult {
+func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int, onBatchComplete func(int)) WriteResult {
 	log.Printf("[WriteBatch] Enqueue called: query=%q, numParams=%d, batchMs=%d", query, len(params), batchMs)
 
 	if m.closed.Load() {
@@ -37,14 +37,20 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 	// If no wait time specified, execute immediately (no batching)
 	if batchMs == 0 {
 		log.Printf("[WriteBatch] Executing immediately (batchMs=0)")
-		return m.executeImmediate(ctx, query, params)
+		result := m.executeImmediate(ctx, query, params)
+		// Call callback even for immediate execution
+		if onBatchComplete != nil {
+			onBatchComplete(result.BatchSize)
+		}
+		return result
 	}
 
 	req := &WriteRequest{
-		Query:      query,
-		Params:     params,
-		ResultChan: make(chan WriteResult, 1),
-		EnqueuedAt: time.Now(),
+		Query:           query,
+		Params:          params,
+		ResultChan:      make(chan WriteResult, 1),
+		EnqueuedAt:      time.Now(),
+		OnBatchComplete: onBatchComplete,
 	}
 
 	// Get or create batch group
@@ -66,7 +72,7 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 		// Group has been processed, this shouldn't happen but handle it
 		group.mu.Unlock()
 		// Retry with a fresh lookup
-		return m.Enqueue(ctx, batchKey, query, params, batchMs)
+		return m.Enqueue(ctx, batchKey, query, params, batchMs, onBatchComplete)
 	}
 	group.Requests = append(group.Requests, req)
 	currentSize := len(group.Requests)

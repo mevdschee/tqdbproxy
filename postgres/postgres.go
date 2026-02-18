@@ -84,6 +84,7 @@ type connState struct {
 	lastBackend        string
 	shard              string
 	lastCacheHit       bool
+	lastBatchSize      int
 	pool               *replica.Pool
 	user               string
 	password           string
@@ -105,12 +106,10 @@ func New(pcfg config.ProxyConfig, pools map[string]*replica.Pool, c *cache.Cache
 		cache:  c,
 	}
 
-	// Initialize write batching context if enabled
-	if pcfg.WriteBatch.Enabled {
-		p.wbCtx, p.wbCancel = context.WithCancel(context.Background())
-		log.Printf("[PostgreSQL] Write batching will be enabled (batch size: %d)",
-			pcfg.WriteBatch.MaxBatchSize)
-	}
+	// Initialize write batching context
+	p.wbCtx, p.wbCancel = context.WithCancel(context.Background())
+	log.Printf("[PostgreSQL] Write batching will be enabled (batch size: %d)",
+		pcfg.WriteBatch.MaxBatchSize)
 
 	return p
 }
@@ -128,7 +127,32 @@ func (p *Proxy) Start() error {
 	p.mu.RLock()
 	listen := p.config.Listen
 	socket := p.config.Socket
+	defaultBackend := p.config.Default
 	p.mu.RUnlock()
+
+	// Get default pool for write batch manager
+	defaultPool := p.pools[defaultBackend]
+	if defaultPool == nil {
+		return fmt.Errorf("default backend pool %q not found", defaultBackend)
+	}
+
+	// Connect to backend PostgreSQL for write batch manager
+	addr := defaultPool.GetPrimary()
+	dsn := fmt.Sprintf("host=%s user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable", addr)
+	if len(addr) > 5 && addr[:5] == "unix:" {
+		dsn = fmt.Sprintf("host=%s user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable", addr[5:])
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("failed to connect to backend for write batching: %v", err)
+	}
+
+	// Initialize write batching
+	wbCfg := writebatch.Config{
+		MaxBatchSize: p.config.WriteBatch.MaxBatchSize,
+	}
+	p.writeBatch = writebatch.New(db, wbCfg)
+	log.Printf("[PostgreSQL] Write batching started")
 
 	// Start TCP listener
 	tcpListener, err := net.Listen("tcp", listen)
@@ -250,10 +274,7 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 
 	// Use the global write batching manager (shared across all connections)
 	// This allows batching to consolidate queries from multiple concurrent connections
-	var connWriteBatch *writebatch.Manager
-	if p.config.WriteBatch.Enabled && p.writeBatch != nil {
-		connWriteBatch = p.writeBatch
-	}
+	connWriteBatch := p.writeBatch
 
 	if err := db.Ping(); err != nil {
 		log.Printf("[PostgreSQL] Backend ping error (conn %d): %v", connID, err)
@@ -743,8 +764,15 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 	// Row 2: Backend
 	response.Write(p.buildDataRow([]interface{}{"Backend", backend}))
 
+	// Row 3: LastBatchSize (if available)
+	rows := 2
+	if state.lastBatchSize > 0 {
+		response.Write(p.buildDataRow([]interface{}{"LastBatchSize", fmt.Sprintf("%d", state.lastBatchSize)}))
+		rows++
+	}
+
 	// CommandComplete
-	cmdPayload := append([]byte("SELECT 2"), 0)
+	cmdPayload := append([]byte(fmt.Sprintf("SELECT %d", rows)), 0)
 	response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
 
 	// ReadyForQuery
@@ -1019,7 +1047,10 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 		// The writebatch executor will call db.Exec(parsed.Query, params...)
 		// which creates its own prepared statement on the backend
 		ctx := context.Background()
-		result := state.writeBatch.Enqueue(ctx, batchKey, parsed.Query, params, batchMs)
+		result := state.writeBatch.Enqueue(ctx, batchKey, parsed.Query, params, batchMs, func(batchSize int) {
+			// Update this connection's batch size when batch completes
+			state.lastBatchSize = batchSize
+		})
 
 		// Update metrics
 		metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()

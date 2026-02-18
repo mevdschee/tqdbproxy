@@ -176,6 +176,7 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 		results[i] = WriteResult{
 			AffectedRows: affected,
 			LastInsertID: lastID,
+			BatchSize:    len(requests),
 		}
 	}
 
@@ -199,6 +200,10 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 	// Send successful results
 	for i, req := range requests {
 		req.ResultChan <- results[i]
+		// Notify connection of batch completion
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
+		}
 	}
 }
 
@@ -290,6 +295,11 @@ func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
 		req.ResultChan <- WriteResult{
 			AffectedRows: 1, // Each request affects 1 row
 			LastInsertID: firstID + int64(i),
+			BatchSize:    len(requests),
+		}
+		// Notify connection of batch completion
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
 		}
 	}
 }
@@ -327,6 +337,11 @@ func (m *Manager) executePreparedBatchFallback(requests []*WriteRequest) {
 		req.ResultChan <- WriteResult{
 			AffectedRows: affected,
 			LastInsertID: lastID,
+			BatchSize:    len(requests),
+		}
+		// Notify connection of batch completion
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
 		}
 	}
 }
@@ -362,6 +377,7 @@ func (m *Manager) executeTransactionBatch(requests []*WriteRequest) {
 		results[i] = WriteResult{
 			AffectedRows: affected,
 			LastInsertID: lastID,
+			BatchSize:    len(requests),
 		}
 	}
 
@@ -375,6 +391,10 @@ func (m *Manager) executeTransactionBatch(requests []*WriteRequest) {
 	// Send results to all requests
 	for i, req := range requests {
 		req.ResultChan <- results[i]
+		// Notify connection of batch completion
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
+		}
 	}
 }
 
@@ -391,5 +411,6 @@ func (m *Manager) executeWrite(query string, params []interface{}) WriteResult {
 	return WriteResult{
 		AffectedRows: affected,
 		LastInsertID: lastID,
+		BatchSize:    1,
 	}
 }

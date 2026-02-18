@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"runtime/pprof"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +22,8 @@ type BenchmarkResult struct {
 	ActualOpsPerSec float64
 	AvgLatencyMs    float64
 	TotalOps        int64
+	TotalBatches    int64
+	AvgBatchSize    float64
 }
 
 func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn string) BenchmarkResult {
@@ -171,12 +175,46 @@ func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn st
 	avgOpsPerSec := float64(total) / elapsed.Seconds()
 	avgLatencyMs := float64(totalLatencyNs.Load()) / float64(total) / 1e6
 
+	// Query batch statistics from proxy
+	var totalBatches int64
+	var avgBatchSize float64
+	if dbType == "postgres" {
+		// Query pg_tqdb_status for batch statistics
+		row := db.QueryRow(`
+			SELECT 
+				COALESCE(SUM(CAST(value AS BIGINT)), 0) 
+			FROM pg_tqdb_status() 
+			WHERE metric LIKE 'writebatch.batches.%'`)
+		row.Scan(&totalBatches)
+	} else {
+		// Query SHOW TQDB STATUS for batch statistics
+		rows, err := db.Query("SHOW TQDB STATUS")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var metric, value string
+				if err := rows.Scan(&metric, &value); err == nil {
+					if strings.HasPrefix(metric, "writebatch.batches.") {
+						if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+							totalBatches += v
+						}
+					}
+				}
+			}
+		}
+	}
+	if totalBatches > 0 {
+		avgBatchSize = float64(total) / float64(totalBatches)
+	}
+
 	return BenchmarkResult{
 		TargetOpsPerSec: targetOpsPerSec,
 		BatchMs:         batchMs,
 		ActualOpsPerSec: avgOpsPerSec,
 		AvgLatencyMs:    avgLatencyMs,
 		TotalOps:        total,
+		TotalBatches:    totalBatches,
+		AvgBatchSize:    avgBatchSize,
 	}
 }
 
@@ -268,8 +306,13 @@ func main() {
 		result := runBenchmark(target, totalRecords, "postgres", pgDSN)
 		pgResults = append(pgResults, result)
 		speedup := result.ActualOpsPerSec / float64(pgResults[0].ActualOpsPerSec)
-		log.Printf("  %dk target -> %.0f ops/sec actual, %.2f ms latency (%.1fx speedup)",
-			target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, speedup)
+		if result.TotalBatches > 0 {
+			log.Printf("  %dk target -> %.0f ops/sec, %.2f ms latency, %.1f avg batch size, %d batches (%.1fx speedup)",
+				target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, result.AvgBatchSize, result.TotalBatches, speedup)
+		} else {
+			log.Printf("  %dk target -> %.0f ops/sec, %.2f ms latency (%.1fx speedup)",
+				target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, speedup)
+		}
 		time.Sleep(1 * time.Second) // Cooldown
 	}
 
@@ -281,8 +324,13 @@ func main() {
 		result := runBenchmark(target, totalRecords, "mysql", mysqlDSN)
 		mysqlResults = append(mysqlResults, result)
 		speedup := result.ActualOpsPerSec / float64(mysqlResults[0].ActualOpsPerSec)
-		log.Printf("  %dk target -> %.0f ops/sec actual, %.2f ms latency (%.1fx speedup)",
-			target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, speedup)
+		if result.TotalBatches > 0 {
+			log.Printf("  %dk target -> %.0f ops/sec, %.2f ms latency, %.1f avg batch size, %d batches (%.1fx speedup)",
+				target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, result.AvgBatchSize, result.TotalBatches, speedup)
+		} else {
+			log.Printf("  %dk target -> %.0f ops/sec, %.2f ms latency (%.1fx speedup)",
+				target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, speedup)
+		}
 		time.Sleep(1 * time.Second) // Cooldown
 	}
 

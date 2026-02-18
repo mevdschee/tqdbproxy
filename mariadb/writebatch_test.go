@@ -26,7 +26,6 @@ func TestWriteBatchIntegration(t *testing.T) {
 			},
 		},
 		WriteBatch: config.WriteBatchConfig{
-			Enabled:      true,
 			MaxBatchSize: 100,
 		},
 	}
@@ -201,7 +200,6 @@ func TestWriteBatchManagerLifecycle(t *testing.T) {
 			"main": {Primary: "127.0.0.1:3306"},
 		},
 		WriteBatch: config.WriteBatchConfig{
-			Enabled:      true,
 			MaxBatchSize: 1000,
 		},
 	}
@@ -267,16 +265,11 @@ func TestWriteBatchConfig(t *testing.T) {
 
 	pcfg := config.ProxyConfig{
 		WriteBatch: config.WriteBatchConfig{
-			Enabled:      true,
 			MaxBatchSize: 1000,
 		},
 	}
 
 	// Verify config is correctly translated
-	if !pcfg.WriteBatch.Enabled {
-		t.Error("WriteBatch should be enabled")
-	}
-
 	if pcfg.WriteBatch.MaxBatchSize != 1000 {
 		t.Errorf("Expected MaxBatchSize 1000, got %d", pcfg.WriteBatch.MaxBatchSize)
 	}

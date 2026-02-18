@@ -26,8 +26,7 @@ type ProxyConfig struct {
 
 // WriteBatchConfig holds configuration for write batching
 type WriteBatchConfig struct {
-	Enabled      bool // Enable write batching
-	MaxBatchSize int  // Maximum batch size
+	MaxBatchSize int // Maximum batch size
 }
 
 // BackendConfig holds configuration for a single backend pool (primary + replicas)
@@ -70,7 +69,6 @@ func loadProxyConfig(cfg *ini.File, protocol, defaultListen string) ProxyConfig 
 		Backends: make(map[string]BackendConfig),
 		DBMap:    make(map[string]string),
 		WriteBatch: WriteBatchConfig{
-			Enabled:      sec.Key("writebatch_enabled").MustBool(false),
 			MaxBatchSize: sec.Key("writebatch_max_batch_size").MustInt(1000),
 		},
 	}

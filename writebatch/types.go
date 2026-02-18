@@ -7,16 +7,18 @@ import (
 
 // WriteRequest represents a single write operation to be batched
 type WriteRequest struct {
-	Query      string
-	Params     []interface{}
-	ResultChan chan WriteResult
-	EnqueuedAt time.Time
+	Query           string
+	Params          []interface{}
+	ResultChan      chan WriteResult
+	EnqueuedAt      time.Time
+	OnBatchComplete func(batchSize int) // Called when batch executes to update connection state
 }
 
 // WriteResult contains the result of a write operation
 type WriteResult struct {
 	AffectedRows int64
 	LastInsertID int64
+	BatchSize    int // Number of operations in the batch that executed this request
 	Error        error
 }
 
