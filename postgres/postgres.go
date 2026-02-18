@@ -1060,6 +1060,11 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 			return result.Error
 		}
 
+		// Track backend and batch size
+		state.lastBackend = "write-batch"
+		state.lastCacheHit = false
+		state.lastBatchSize = result.BatchSize
+
 		// Success - send result to client
 		var response bytes.Buffer
 

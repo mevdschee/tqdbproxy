@@ -19,8 +19,11 @@ func TestBatchSizeReporting(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Set max connections to 1 to ensure we use the same connection
-	db.SetMaxOpenConns(1)
+	numQueries := 10
+	
+	// Set max connections to allow parallel execution
+	// This lets multiple goroutines send queries simultaneously for batching
+	db.SetMaxOpenConns(numQueries)
 	db.SetMaxIdleConns(1)
 
 	// Create test table
@@ -35,16 +38,34 @@ func TestBatchSizeReporting(t *testing.T) {
 	}
 	defer db.Exec("DROP TABLE IF EXISTS batch_test")
 
-	// Execute writes with batch hints using Query (not Exec) to avoid prepared statements
-	// The batch hint must be sent as part of the SQL text, not through binary protocol
-	numQueries := 10
+	// Prepare statement with batch hint
+	// Prepared statements share the same batch key regardless of parameter values
+	stmt, err := db.Prepare("/* batch:1000 */ INSERT INTO batch_test (value) VALUES (?)")
+	if err != nil {
+		t.Fatalf("Failed to prepare statement: %v", err)
+	}
+	defer stmt.Close()
+
+	// Execute writes in parallel using goroutines with different values
+	// All executions share the same batch key from the prepared statement
+	errChan := make(chan error, numQueries)
+	
 	for i := 0; i < numQueries; i++ {
-		query := fmt.Sprintf("/* batch:1000 */ INSERT INTO batch_test (value) VALUES (%d)", i)
-		rows, err := db.Query(query)
-		if err != nil {
-			t.Fatalf("Failed to execute query %d: %v", i, err)
+		go func(idx int) {
+			_, err := stmt.Exec(idx)
+			if err != nil {
+				errChan <- fmt.Errorf("exec %d failed: %v", idx, err)
+				return
+			}
+			errChan <- nil
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < numQueries; i++ {
+		if err := <-errChan; err != nil {
+			t.Fatalf("Failed to execute query: %v", err)
 		}
-		rows.Close()
 	}
 
 	// Wait a moment for batch to flush (batch:1000 means 1000ms window)

@@ -913,6 +913,184 @@ func (c *clientConn) execQueryOnConn(conn net.Conn, query string) ([]byte, error
 	}
 }
 
+// decodeStmtParams decodes parameters from a COM_STMT_EXECUTE packet
+// The data format is:
+// [0:4]   statement ID
+// [4]     flags
+// [5:9]   iteration-count (always 1)
+// [9:]    null-bitmap (ceil(num_params / 8) bytes)
+// [9+N]   new_params_bound_flag (1 byte)
+// [...]   if new_params_bound_flag: parameter types (2 bytes each)
+// [...]   parameter values
+func (c *clientConn) decodeStmtParams(data []byte, parsed *parser.ParsedQuery) ([]interface{}, error) {
+	if len(data) < 10 {
+		return nil, fmt.Errorf("packet too short")
+	}
+
+	// Count the number of parameters by counting placeholders in the query
+	numParams := strings.Count(parsed.Query, "?")
+	if numParams == 0 {
+		return []interface{}{}, nil
+	}
+
+	// Calculate null bitmap size
+	nullBitmapLen := (numParams + 7) / 8
+	if len(data) < 10+nullBitmapLen {
+		return nil, fmt.Errorf("packet too short for null bitmap")
+	}
+
+	nullBitmap := data[9 : 9+nullBitmapLen]
+	pos := 9 + nullBitmapLen
+
+	if pos >= len(data) {
+		return nil, fmt.Errorf("packet too short for new_params_bound_flag")
+	}
+
+	newParamsBound := data[pos]
+	pos++
+
+	var paramTypes []byte
+	if newParamsBound == 1 {
+		// Read parameter types (2 bytes per parameter)
+		typesLen := numParams * 2
+		if pos+typesLen > len(data) {
+			return nil, fmt.Errorf("packet too short for parameter types")
+		}
+		paramTypes = data[pos : pos+typesLen]
+		pos += typesLen
+	}
+
+	// Decode parameter values
+	params := make([]interface{}, numParams)
+	for i := 0; i < numParams; i++ {
+		// Check if parameter is NULL
+		bytePos := i / 8
+		bitPos := uint(i % 8)
+		if nullBitmap[bytePos]&(1<<bitPos) != 0 {
+			params[i] = nil
+			continue
+		}
+
+		// Determine parameter type
+		var fieldType byte
+		var unsigned bool
+		if newParamsBound == 1 {
+			fieldType = paramTypes[i*2]
+			unsigned = paramTypes[i*2+1] == 0x80
+		} else {
+			// If types weren't sent, we can't decode properly
+			// This is a limitation - in practice, types are usually sent on first execute
+			return nil, fmt.Errorf("cannot decode parameters without type information")
+		}
+
+		// Decode based on type
+		var err error
+		params[i], pos, err = c.decodeParamValue(data, pos, fieldType, unsigned)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode param %d: %v", i, err)
+		}
+	}
+
+	return params, nil
+}
+
+// decodeParamValue decodes a single parameter value
+func (c *clientConn) decodeParamValue(data []byte, pos int, fieldType byte, unsigned bool) (interface{}, int, error) {
+	const (
+		MYSQL_TYPE_TINY       = 0x01
+		MYSQL_TYPE_SHORT      = 0x02
+		MYSQL_TYPE_LONG       = 0x03
+		MYSQL_TYPE_LONGLONG   = 0x08
+		MYSQL_TYPE_STRING     = 0xfe
+		MYSQL_TYPE_VAR_STRING = 0xfd
+	)
+
+	switch fieldType {
+	case MYSQL_TYPE_TINY:
+		if pos+1 > len(data) {
+			return nil, pos, fmt.Errorf("not enough data for TINY")
+		}
+		if unsigned {
+			return uint64(data[pos]), pos + 1, nil
+		}
+		return int64(int8(data[pos])), pos + 1, nil
+
+	case MYSQL_TYPE_SHORT:
+		if pos+2 > len(data) {
+			return nil, pos, fmt.Errorf("not enough data for SHORT")
+		}
+		val := binary.LittleEndian.Uint16(data[pos : pos+2])
+		if unsigned {
+			return uint64(val), pos + 2, nil
+		}
+		return int64(int16(val)), pos + 2, nil
+
+	case MYSQL_TYPE_LONG:
+		if pos+4 > len(data) {
+			return nil, pos, fmt.Errorf("not enough data for LONG")
+		}
+		val := binary.LittleEndian.Uint32(data[pos : pos+4])
+		if unsigned {
+			return uint64(val), pos + 4, nil
+		}
+		return int64(int32(val)), pos + 4, nil
+
+	case MYSQL_TYPE_LONGLONG:
+		if pos+8 > len(data) {
+			return nil, pos, fmt.Errorf("not enough data for LONGLONG")
+		}
+		val := binary.LittleEndian.Uint64(data[pos : pos+8])
+		if unsigned {
+			return uint64(val), pos + 8, nil
+		}
+		return int64(val), pos + 8, nil
+
+	case MYSQL_TYPE_STRING, MYSQL_TYPE_VAR_STRING:
+		// Length-encoded string
+		strLen, n := c.decodeLengthEncodedInt(data[pos:])
+		if n == 0 {
+			return nil, pos, fmt.Errorf("failed to decode string length")
+		}
+		pos += n
+		if pos+int(strLen) > len(data) {
+			return nil, pos, fmt.Errorf("not enough data for string")
+		}
+		return string(data[pos : pos+int(strLen)]), pos + int(strLen), nil
+
+	default:
+		return nil, pos, fmt.Errorf("unsupported field type: 0x%02x", fieldType)
+	}
+}
+
+// decodeLengthEncodedInt decodes a length-encoded integer and returns the value and number of bytes read
+func (c *clientConn) decodeLengthEncodedInt(data []byte) (uint64, int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+
+	switch data[0] {
+	case 0xfb:
+		return 0, 1 // NULL
+	case 0xfc:
+		if len(data) < 3 {
+			return 0, 0
+		}
+		return uint64(data[1]) | uint64(data[2])<<8, 3
+	case 0xfd:
+		if len(data) < 4 {
+			return 0, 0
+		}
+		return uint64(data[1]) | uint64(data[2])<<8 | uint64(data[3])<<16, 4
+	case 0xfe:
+		if len(data) < 9 {
+			return 0, 0
+		}
+		return binary.LittleEndian.Uint64(data[1:9]), 9
+	default:
+		return uint64(data[0]), 1
+	}
+}
+
 func (c *clientConn) handleExecute(data []byte) error {
 	if len(data) < 4 {
 		return fmt.Errorf("malformed COM_STMT_EXECUTE packet")
@@ -926,7 +1104,15 @@ func (c *clientConn) handleExecute(data []byte) error {
 	// Check if this prepared statement should be batched
 	// Only batch writes outside of transactions
 	if c.proxy.writeBatch != nil && !c.inTransaction && parsed.IsWritable() && parsed.IsBatchable() {
-		return c.handleBatchedPreparedExecute(stmtID, data, parsed)
+		// Decode parameters from the binary format
+		params, err := c.decodeStmtParams(data, parsed)
+		if err != nil {
+			log.Printf("[MariaDB] Failed to decode prepared statement parameters: %v, falling back to direct execution", err)
+			// Fall back to direct execution
+		} else {
+			log.Printf("[MariaDB] Decoded %d parameters for batching: %v", len(params), params)
+			return c.handleBatchedPreparedExecute(stmtID, data, parsed, params)
+		}
 	}
 
 	var cacheKey string
@@ -1523,7 +1709,7 @@ func (c *clientConn) handleBatchedWrite(query string, batchMs int, start time.Ti
 	return c.writeOKWithRowsAndID(result.AffectedRows, result.LastInsertID, moreResults)
 }
 
-func (c *clientConn) handleBatchedPreparedExecute(stmtID uint32, data []byte, parsed *parser.ParsedQuery) error {
+func (c *clientConn) handleBatchedPreparedExecute(stmtID uint32, data []byte, parsed *parser.ParsedQuery, params []interface{}) error {
 	start := time.Now()
 	batchKey := parsed.GetBatchKey()
 	batchMs := parsed.BatchMs
@@ -1531,9 +1717,9 @@ func (c *clientConn) handleBatchedPreparedExecute(stmtID uint32, data []byte, pa
 	lineStr := strconv.Itoa(parsed.Line)
 	queryType := queryTypeLabel(parsed.Type)
 
-	// Enqueue the prepared statement execution
+	// Enqueue the prepared statement execution with decoded parameters
 	ctx := context.Background()
-	result := c.proxy.writeBatch.Enqueue(ctx, batchKey, parsed.Query, nil, batchMs, func(batchSize int) {
+	result := c.proxy.writeBatch.Enqueue(ctx, batchKey, parsed.Query, params, batchMs, func(batchSize int) {
 		c.mu.Lock()
 		c.lastBatchSize = batchSize
 		c.mu.Unlock()
