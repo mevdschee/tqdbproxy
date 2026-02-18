@@ -112,12 +112,12 @@ func (p *ParsedQuery) IsWritable() bool {
 }
 
 // IsBatchable returns true if write can be batched
-// Only INSERT queries can be batched - UPDATE and DELETE have different
-// WHERE clauses and cannot be combined into multi-value statements
-// Note: Transaction state is tracked at connection level
+// INSERTs, UPDATEs, and DELETEs can be batched when they have a batch hint
+// Note: For UPDATE and DELETE, batching works when queries are identical
+// Transaction state is tracked at connection level
 func (p *ParsedQuery) IsBatchable() bool {
-	// A query is batchable if it's an INSERT and has a batch hint
-	return p.Type == QueryInsert && p.BatchMs > 0
+	// A query is batchable if it's a write operation and has a batch hint
+	return (p.Type == QueryInsert || p.Type == QueryUpdate || p.Type == QueryDelete) && p.BatchMs > 0
 }
 
 // GetBatchKey returns a key for grouping writes for batching
