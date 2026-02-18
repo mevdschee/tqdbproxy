@@ -1,18 +1,29 @@
 # PostgreSQL Component
 
-The `postgres` component implements the PostgreSQL wire protocol, allowing TQDBProxy to act as a transparent or intelligent proxy for PostgreSQL databases.
+The `postgres` component implements the PostgreSQL wire protocol, allowing
+TQDBProxy to act as a transparent or intelligent proxy for PostgreSQL databases.
 
 ## Features
 
-- **Protocol Handshake**: Handles the initial connection, SSL negotiation denial, and authentication with the backend PostgreSQL server.
-- **Command Interception**: Intercepts simple query messages ('Q') for caching and metrics.
+- **Protocol Handshake**: Handles the initial connection, SSL negotiation
+  denial, and authentication with the backend PostgreSQL server.
+- **Command Interception**: Intercepts simple query messages ('Q') for caching
+  and metrics.
+- **Prepared Statements**: Full support for PostgreSQL prepared statement
+  protocol (Parse, Bind, Execute, Close).
 - **Caching Integration**:
   - Checks the cache for `SELECT` queries with a TTL hint.
-  - Automatically caches results returned from the backend if the query is cacheable.
-  - **Thundering Herd Protection**: Serves stale data to concurrent requests while one request refreshes the cache.
-  - **Cold Cache Single-Flight**: Prevents concurrent DB queries for the same uncached key.
-- **Database Sharding**: Routes client connections to the correct shard based on the `database` parameter in the startup message.
-- **Backend Connection**: Uses Go's `database/sql` with `lib/pq` driver for backend connections.
+  - Automatically caches results returned from the backend if the query is
+    cacheable.
+  - Supports caching of prepared statement executions with parameter binding.
+  - **Thundering Herd Protection**: Serves stale data to concurrent requests
+    while one request refreshes the cache.
+  - **Cold Cache Single-Flight**: Prevents concurrent DB queries for the same
+    uncached key.
+- **Database Sharding**: Routes client connections to the correct shard based on
+  the `database` parameter in the startup message.
+- **Backend Connection**: Uses Go's `database/sql` with `lib/pq` driver for
+  backend connections.
 
 ## Query Status
 
@@ -27,11 +38,13 @@ tqdbproxy=> SELECT * FROM pg_tqdb_status;
 (3 rows)
 ```
 
-Values: `Backend` = `primary`, `replicas[n]`, `cache`, `cache (stale)` or `none`;
+Values: `Backend` = `primary`, `replicas[n]`, `cache`, `cache (stale)` or
+`none`;
 
 ## Unix Socket Support
 
-The PostgreSQL proxy can listen on both TCP and a Unix socket simultaneously. Use the `socket` option to specify a Unix socket path:
+The PostgreSQL proxy can listen on both TCP and a Unix socket simultaneously.
+Use the `socket` option to specify a Unix socket path:
 
 ```ini
 [postgres]
@@ -55,6 +68,8 @@ psql -h /var/run/tqdbproxy -p 5433 -U tqdbproxy -d tqdbproxy
 
 ## Metrics Integration
 
-The PostgreSQL component records detailed metrics for every query, including latency and cache status, labeled with source file and line number information extracted from SQL hints.
+The PostgreSQL component records detailed metrics for every query, including
+latency and cache status, labeled with source file and line number information
+extracted from SQL hints.
 
 [Back to Index](../../README.md)

@@ -220,6 +220,13 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 	conn.backendAddr = addr
 	conn.backendName = "primary"
 
+	// If client specified a database in handshake, select it on backend
+	if conn.db != "" {
+		if _, err := conn.execBackendQuery(fmt.Sprintf("USE `%s`", conn.db)); err != nil {
+			log.Printf("[MariaDB] Failed to select initial database %s: %v", conn.db, err)
+		}
+	}
+
 	// Successfully authenticated both client and backend
 	conn.run()
 }

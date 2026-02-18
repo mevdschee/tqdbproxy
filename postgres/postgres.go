@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -40,6 +42,10 @@ const (
 	msgAuthentication  = 'R'
 	msgParameterStatus = 'S'
 	msgBackendKeyData  = 'K'
+	msgParseComplete   = '1'
+	msgBindComplete    = '2'
+	msgCloseComplete   = '3'
+	msgNoData          = 'n'
 )
 
 var connCounter uint32
@@ -69,15 +75,18 @@ type Proxy struct {
 
 // connState tracks per-connection state for TQDB status
 type connState struct {
-	lastBackend  string
-	shard        string
-	lastCacheHit bool
-	pool         *replica.Pool
-	user         string
-	password     string
-	database     string
-	primaryDB    *sql.DB
-	replicaDBs   map[string]*sql.DB
+	lastBackend        string
+	shard              string
+	lastCacheHit       bool
+	pool               *replica.Pool
+	user               string
+	password           string
+	database           string
+	primaryDB          *sql.DB
+	replicaDBs         map[string]*sql.DB
+	preparedStatements map[string]string        // statement name -> query SQL
+	boundParams        map[string][]interface{} // portal name -> parameters
+	portalStatements   map[string]string        // portal name -> statement name
 }
 
 // New creates a new PostgreSQL proxy
@@ -253,13 +262,16 @@ func (p *Proxy) handleConnection(client net.Conn, connID uint32) {
 
 	// Handle messages
 	state := &connState{
-		shard:      backendName,
-		pool:       pool,
-		user:       user,
-		password:   password,
-		database:   database,
-		primaryDB:  db,
-		replicaDBs: make(map[string]*sql.DB),
+		shard:              backendName,
+		pool:               pool,
+		user:               user,
+		password:           password,
+		database:           database,
+		primaryDB:          db,
+		replicaDBs:         make(map[string]*sql.DB),
+		preparedStatements: make(map[string]string),
+		boundParams:        make(map[string][]interface{}),
+		portalStatements:   make(map[string]string),
 	}
 	defer func() {
 		for _, rdb := range state.replicaDBs {
@@ -361,9 +373,35 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32, state
 		switch msgType {
 		case msgQuery:
 			p.handleQuery(payload, client, db, state)
+		case msgParse:
+			if err := p.handleParse(payload, client, state); err != nil {
+				log.Printf("[PostgreSQL] Parse error (conn %d): %v", connID, err)
+				p.sendError(client, "42000", err.Error())
+				p.writeMessage(client, msgReadyForQuery, []byte{'I'})
+			}
+		case msgBind:
+			if err := p.handleBind(payload, client, state); err != nil {
+				log.Printf("[PostgreSQL] Bind error (conn %d): %v", connID, err)
+				p.sendError(client, "42000", err.Error())
+				p.writeMessage(client, msgReadyForQuery, []byte{'I'})
+			}
+		case msgDescribe:
+			// Send NoData (we don't fully support describe yet)
+			p.writeMessage(client, msgNoData, []byte{})
+		case msgExecute:
+			if err := p.handleExecute(payload, client, db, connID, state); err != nil {
+				log.Printf("[PostgreSQL] Execute error (conn %d): %v", connID, err)
+				p.sendError(client, "42000", err.Error())
+			}
+		case 'C': // Close
+			p.handleClose(payload, client, state)
+		case msgSync:
+			// Send ReadyForQuery
+			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		case msgTerminate:
 			return
 		default:
+			log.Printf("[PostgreSQL] Unhandled message type %c (conn %d)", msgType, connID)
 			// For unhandled messages, send ReadyForQuery
 			p.writeMessage(client, msgReadyForQuery, []byte{'I'})
 		}
@@ -681,4 +719,310 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 	if _, err := client.Write(response.Bytes()); err != nil {
 		log.Printf("[PostgreSQL] TQDB status response error: %v", err)
 	}
+}
+
+// handleParse handles the Parse message (prepared statement creation)
+// Parse message format: stmt_name\0 + query\0 + num_params(int16) + param_types[]
+func (p *Proxy) handleParse(payload []byte, client net.Conn, state *connState) error {
+	// Extract statement name (null-terminated)
+	stmtNameEnd := bytes.IndexByte(payload, 0)
+	if stmtNameEnd < 0 {
+		return fmt.Errorf("malformed Parse message: no statement name terminator")
+	}
+	stmtName := string(payload[:stmtNameEnd])
+
+	// Extract query (null-terminated after statement name)
+	queryStart := stmtNameEnd + 1
+	queryEnd := bytes.IndexByte(payload[queryStart:], 0)
+	if queryEnd < 0 {
+		return fmt.Errorf("malformed Parse message: no query terminator")
+	}
+	query := string(payload[queryStart : queryStart+queryEnd])
+
+	// Store the prepared statement
+	state.preparedStatements[stmtName] = query
+
+	// Send ParseComplete
+	return p.writeMessage(client, msgParseComplete, []byte{})
+}
+
+// handleBind handles the Bind message (bind parameters to a prepared statement)
+// Bind message format: portal_name\0 + stmt_name\0 + format_codes + num_params + param_values + result_format_codes
+func (p *Proxy) handleBind(payload []byte, client net.Conn, state *connState) error {
+	// Extract portal name (null-terminated)
+	portalNameEnd := bytes.IndexByte(payload, 0)
+	if portalNameEnd < 0 {
+		return fmt.Errorf("malformed Bind message: no portal name terminator")
+	}
+	portalName := string(payload[:portalNameEnd])
+
+	// Extract statement name (null-terminated after portal name)
+	stmtStart := portalNameEnd + 1
+	stmtNameEnd := bytes.IndexByte(payload[stmtStart:], 0)
+	if stmtNameEnd < 0 {
+		return fmt.Errorf("malformed Bind message: no statement name terminator")
+	}
+	stmtName := string(payload[stmtStart : stmtStart+stmtNameEnd])
+
+	// Verify the prepared statement exists
+	if _, ok := state.preparedStatements[stmtName]; !ok {
+		return fmt.Errorf("unknown prepared statement: %s", stmtName)
+	}
+
+	// Parse the rest of the Bind message to extract parameters
+	pos := stmtStart + stmtNameEnd + 1
+
+	// Read parameter format codes count
+	if pos+2 > len(payload) {
+		return fmt.Errorf("malformed Bind message: incomplete format codes")
+	}
+	numFormatCodes := int(binary.BigEndian.Uint16(payload[pos : pos+2]))
+	pos += 2
+
+	// Skip format codes
+	pos += numFormatCodes * 2
+
+	// Read number of parameters
+	if pos+2 > len(payload) {
+		return fmt.Errorf("malformed Bind message: incomplete parameter count")
+	}
+	numParams := int(binary.BigEndian.Uint16(payload[pos : pos+2]))
+	pos += 2
+
+	// Extract parameter values
+	params := make([]interface{}, numParams)
+	for i := 0; i < numParams; i++ {
+		if pos+4 > len(payload) {
+			return fmt.Errorf("malformed Bind message: incomplete parameter length")
+		}
+		paramLen := int(binary.BigEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+
+		if paramLen == -1 {
+			// NULL parameter
+			params[i] = nil
+		} else {
+			if pos+paramLen > len(payload) {
+				return fmt.Errorf("malformed Bind message: incomplete parameter value")
+			}
+			// Store parameter as string for simplicity
+			params[i] = string(payload[pos : pos+paramLen])
+			pos += paramLen
+		}
+	}
+
+	// Store the portal-to-statement mapping and bound parameters
+	state.portalStatements[portalName] = stmtName
+	state.boundParams[portalName] = params
+
+	// Send BindComplete
+	return p.writeMessage(client, msgBindComplete, []byte{})
+}
+
+// handleExecute handles the Execute message (execute a bound portal)
+// Execute message format: portal_name\0 + max_rows(int32)
+func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connID uint32, state *connState) error {
+	start := time.Now()
+
+	// Extract portal name (null-terminated)
+	portalNameEnd := bytes.IndexByte(payload, 0)
+	if portalNameEnd < 0 {
+		return fmt.Errorf("malformed Execute message: no portal name terminator")
+	}
+	portalName := string(payload[:portalNameEnd])
+
+	// Get bound parameters
+	params, ok := state.boundParams[portalName]
+	if !ok {
+		// Empty portal (unnamed) - this is allowed, use empty params
+		params = []interface{}{}
+	}
+
+	// Get the statement name for this portal
+	stmtName, ok := state.portalStatements[portalName]
+	if !ok {
+		// Try unnamed statement for unnamed portal
+		stmtName = ""
+	}
+
+	// Get the query from the statement
+	query, ok := state.preparedStatements[stmtName]
+	if !ok {
+		return fmt.Errorf("no prepared statement for portal: %s (statement: %s)", portalName, stmtName)
+	}
+
+	// Parse the query
+	parsed := parser.Parse(query)
+
+	file := parsed.File
+	if file == "" {
+		file = "unknown"
+	}
+	line := "0"
+	if parsed.Line > 0 {
+		line = strconv.Itoa(parsed.Line)
+	}
+	queryType := queryTypeLabel(parsed.Type)
+
+	// Build cache key including parameters
+	var cacheKey string
+	if parsed.IsCacheable() && len(params) > 0 {
+		// Create a cache key that includes the query and parameters
+		h := sha1.New()
+		h.Write([]byte(state.database))
+		h.Write([]byte(parsed.Query))
+		for _, param := range params {
+			h.Write([]byte(fmt.Sprintf("%v", param)))
+		}
+		cacheKey = "ps:" + hex.EncodeToString(h.Sum(nil))
+
+		// Check cache
+		cached, flags, ok := p.cache.Get(cacheKey)
+		if ok {
+			if flags == cache.FlagFresh {
+				metrics.CacheHits.WithLabelValues(file, line).Inc()
+				metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
+				metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+				state.lastBackend = "cache"
+				state.lastCacheHit = true
+				if _, err := client.Write(cached); err != nil {
+					log.Printf("[PostgreSQL] Cache response error: %v", err)
+				}
+				return nil
+			}
+
+			if flags == cache.FlagStale {
+				metrics.CacheHits.WithLabelValues(file, line).Inc()
+				metrics.QueryTotal.WithLabelValues(file, line, queryType, "true").Inc()
+				metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+				state.lastBackend = "cache (stale)"
+				state.lastCacheHit = true
+				if _, err := client.Write(cached); err != nil {
+					log.Printf("[PostgreSQL] Cache response error: %v", err)
+				}
+				return nil
+			}
+		}
+		metrics.CacheMisses.WithLabelValues(file, line).Inc()
+	}
+
+	// Execute the query with parameters
+	var response bytes.Buffer
+
+	// Select backend
+	targetDB := state.primaryDB
+	backendName := "primary"
+
+	if parsed.IsCacheable() {
+		addr, name := state.pool.GetReplica()
+		if name != "primary" {
+			backendName = name
+			rdb := state.replicaDBs[addr]
+			if rdb == nil {
+				var err error
+				rdb, err = p.connectToBackend(addr, state.user, state.password, state.database)
+				if err != nil {
+					log.Printf("[PostgreSQL] Error connecting to replica %s: %v", addr, err)
+				} else {
+					state.replicaDBs[addr] = rdb
+				}
+			}
+			if rdb != nil {
+				targetDB = rdb
+			}
+		}
+	}
+
+	// Execute the prepared statement with parameters
+	rows, err := targetDB.Query(parsed.Query, params...)
+	if err != nil {
+		if cacheKey != "" {
+			p.cache.CancelInflight(cacheKey)
+		}
+		return err
+	}
+	defer rows.Close()
+
+	// Get column info
+	cols, _ := rows.Columns()
+	if len(cols) > 0 {
+		// Send RowDescription
+		rowDesc := p.buildRowDescription(cols)
+		response.Write(rowDesc)
+
+		// Send data rows
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		rowCount := 0
+		for rows.Next() {
+			rows.Scan(valuePtrs...)
+			dataRow := p.buildDataRow(values)
+			response.Write(dataRow)
+			rowCount++
+		}
+
+		// Send CommandComplete
+		cmdComplete := fmt.Sprintf("SELECT %d", rowCount)
+		cmdPayload := append([]byte(cmdComplete), 0)
+		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+	} else {
+		// Non-SELECT query
+		cmdPayload := append([]byte("INSERT 0 1"), 0)
+		response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
+	}
+
+	// Track state
+	state.lastBackend = backendName
+	state.lastCacheHit = false
+
+	metrics.DatabaseQueries.WithLabelValues(backendName).Inc()
+	metrics.QueryTotal.WithLabelValues(file, line, queryType, "false").Inc()
+	metrics.QueryLatency.WithLabelValues(file, line, queryType).Observe(time.Since(start).Seconds())
+
+	// Cache response if cacheable
+	if cacheKey != "" {
+		p.cache.SetAndNotify(cacheKey, response.Bytes(), time.Duration(parsed.TTL)*time.Second)
+	}
+
+	// Send response to client
+	if _, err := client.Write(response.Bytes()); err != nil {
+		log.Printf("[PostgreSQL] Client write error: %v", err)
+		return err
+	}
+
+	return nil
+}
+
+// handleClose handles the Close message (close a prepared statement or portal)
+// Close message format: type('S' for statement, 'P' for portal) + name\0
+func (p *Proxy) handleClose(payload []byte, client net.Conn, state *connState) {
+	if len(payload) < 2 {
+		log.Printf("[PostgreSQL] Malformed Close message")
+		p.writeMessage(client, msgCloseComplete, []byte{})
+		return
+	}
+
+	closeType := payload[0] // 'S' for statement, 'P' for portal
+	nameEnd := bytes.IndexByte(payload[1:], 0)
+	if nameEnd < 0 {
+		nameEnd = len(payload) - 1
+	} else {
+		nameEnd += 1
+	}
+	name := string(payload[1:nameEnd])
+
+	if closeType == 'S' {
+		// Close prepared statement
+		delete(state.preparedStatements, name)
+	} else if closeType == 'P' {
+		// Close portal
+		delete(state.boundParams, name)
+	}
+
+	// Send CloseComplete
+	p.writeMessage(client, msgCloseComplete, []byte{})
 }
