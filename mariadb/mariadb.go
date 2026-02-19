@@ -598,7 +598,6 @@ func (c *clientConn) handleRollback(moreResults bool) error {
 
 func (c *clientConn) handleQuery(query string) error {
 	start := time.Now()
-	log.Printf("[MariaDB] handleQuery received: %q", query)
 	parsed := parser.Parse(query)
 
 	// Split multi-statement queries
@@ -1116,7 +1115,6 @@ func (c *clientConn) handleExecute(data []byte) error {
 			log.Printf("[MariaDB] Failed to decode prepared statement parameters: %v, falling back to direct execution", err)
 			// Fall back to direct execution
 		} else {
-			log.Printf("[MariaDB] Decoded %d parameters for batching: %v", len(params), params)
 			return c.handleBatchedPreparedExecute(stmtID, data, parsed, params)
 		}
 	}

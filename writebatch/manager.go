@@ -36,7 +36,6 @@ func New(db *sql.DB, config Config) *Manager {
 // batchMs is the maximum wait time in milliseconds (0 = execute immediately)
 func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int, onBatchComplete func(int)) WriteResult {
 	hasReturning := hasReturningClause(query)
-	log.Printf("[WriteBatch] Enqueue called: query=%q, numParams=%d, batchMs=%d, hasReturning=%v", query, len(params), batchMs, hasReturning)
 
 	if m.closed.Load() {
 		return WriteResult{Error: ErrManagerClosed}
@@ -44,7 +43,6 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 
 	// If no wait time specified, execute immediately (no batching)
 	if batchMs == 0 {
-		log.Printf("[WriteBatch] Executing immediately (batchMs=0)")
 		result := m.executeImmediate(ctx, query, params)
 		// Call callback even for immediate execution
 		if onBatchComplete != nil {
@@ -120,7 +118,6 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 
 // executeImmediate executes a query immediately without batching
 func (m *Manager) executeImmediate(ctx context.Context, query string, params []interface{}) WriteResult {
-	log.Printf("[WriteBatch] executeImmediate: query=%q, params=%v", query, params)
 	result, err := m.db.ExecContext(ctx, query, params...)
 	if err != nil {
 		log.Printf("[WriteBatch] executeImmediate ERROR: %v", err)

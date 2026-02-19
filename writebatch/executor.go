@@ -39,10 +39,6 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 	// Count this batch
 	m.batchCount.Add(1)
 
-	// Log batch execution
-	log.Printf("[WriteBatch] Executing batch: size=%d, batchKey=%q, delay=%v",
-		batchSize, batchKey, time.Since(firstSeen))
-
 	// Record metrics
 	batchStart := time.Now()
 	if requests[0] != nil {
@@ -139,9 +135,6 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 	firstQuery := requests[0].Query
 	hasReturning := requests[0].HasReturning
 
-	log.Printf("[WriteBatch] executePreparedBatch: query=%q, numRequests=%d, firstParams=%v, hasReturning=%v",
-		firstQuery, len(requests), requests[0].Params, hasReturning)
-
 	// Start a transaction for the batch
 	tx, err := m.db.Begin()
 	if err != nil {
@@ -174,12 +167,10 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 			var returnedValue int64
 			err := stmt.QueryRow(req.Params...).Scan(&returnedValue)
 			if err != nil {
-				log.Printf("[WriteBatch] QueryRow.Scan error: %v", err)
 				results[i] = WriteResult{Error: err}
 				hasError = true
 				continue
 			}
-			log.Printf("[WriteBatch] RETURNING captured value: %d", returnedValue)
 			results[i] = WriteResult{
 				AffectedRows:    1,
 				ReturningValues: []interface{}{returnedValue},

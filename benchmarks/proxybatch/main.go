@@ -15,6 +15,37 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// dbIOStats holds the I/O counter snapshotted before and after a run.
+type dbIOStats struct {
+	pgFsyncs       int64 // PostgreSQL: wal_sync from pg_stat_wal
+	mysqlLogWrites int64 // MariaDB:    Innodb_log_writes
+}
+
+func readPGIOStats(db *sql.DB) dbIOStats {
+	var s dbIOStats
+	db.QueryRow(`SELECT wal_sync FROM pg_stat_wal`).Scan(&s.pgFsyncs)
+	return s
+}
+
+func readMySQLIOStats(db *sql.DB) dbIOStats {
+	var s dbIOStats
+	rows, err := db.Query(`SHOW GLOBAL STATUS WHERE Variable_name = 'Innodb_log_writes'`)
+	if err != nil {
+		return s
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			continue
+		}
+		if k == "Innodb_log_writes" {
+			s.mysqlLogWrites, _ = strconv.ParseInt(v, 10, 64)
+		}
+	}
+	return s
+}
+
 type BenchmarkResult struct {
 	TargetOpsPerSec int
 	BatchMs         int
@@ -23,28 +54,21 @@ type BenchmarkResult struct {
 	TotalOps        int64
 	TotalBatches    int64
 	AvgBatchSize    float64
+	DBFsyncs        int64 // PG: wal_sync delta; MariaDB: Innodb_log_writes delta
 }
 
-func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn string) BenchmarkResult {
+func runBenchmark(numWorkers int, batchMs int, totalRecords int64, dbType string, dsn string) BenchmarkResult {
 	db, err := sql.Open(dbType, dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	// Configure connection pool based on expected load.
-	// Must match numWorkers so every goroutine can hold an open connection
-	// concurrently; a lower limit serialises requests and kills batching.
-	if targetOpsPerSec <= 10_000 {
-		db.SetMaxOpenConns(100)
-		db.SetMaxIdleConns(100)
-	} else if targetOpsPerSec <= 100_000 {
-		db.SetMaxOpenConns(1000)
-		db.SetMaxIdleConns(1000)
-	} else {
-		db.SetMaxOpenConns(5000)
-		db.SetMaxIdleConns(5000)
-	}
+	// Pool must be at least as large as numWorkers so every goroutine can hold
+	// an open connection concurrently; a lower limit serialises requests and
+	// kills batching.
+	db.SetMaxOpenConns(numWorkers)
+	db.SetMaxIdleConns(numWorkers)
 	db.SetConnMaxLifetime(30 * time.Second)
 
 	// Test connection
@@ -76,45 +100,10 @@ func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn st
 		db.Exec("DELETE FROM test")
 	}
 
-	// Configure write batch manager with hint-based batching
-	// Different batch windows based on target rate
-	var batchMs int
-	var batchLabel string
-
-	if targetOpsPerSec <= 1_000 {
-		// Baseline: no batching
-		batchMs = 0
-		batchLabel = "NO BATCHING"
-	} else if targetOpsPerSec <= 10_000 {
-		// Low rate: use 1ms batching window
-		batchMs = 1
-		batchLabel = "1ms window"
-	} else if targetOpsPerSec <= 100_000 {
-		// Medium rate: use 10ms batching window
-		batchMs = 10
-		batchLabel = "10ms window"
-	} else {
-		// High rate: use 1000ms batching window
-		batchMs = 1000
-		batchLabel = "1000ms window"
-	}
-
-	log.Printf("  Batch config: %s (hint: batch:%d)", batchLabel, batchMs)
-
 	// Track operations and latencies
 	var totalOps atomic.Int64
 	var totalLatencyNs atomic.Int64
 	var wg sync.WaitGroup
-
-	// Scale workers based on target rate to avoid over-saturation at low rates
-	var numWorkers int
-	if targetOpsPerSec <= 10_000 {
-		numWorkers = 100 // Fewer workers for low rates
-	} else if targetOpsPerSec <= 100_000 {
-		numWorkers = 1000
-	} else {
-		numWorkers = 5000 // Max workers for high rates
-	}
 
 	startTime := time.Now()
 
@@ -147,6 +136,21 @@ func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn st
 		return n
 	}
 	batchCountBefore := readBatchCount()
+
+	// Open a direct backend connection (bypassing proxy) for I/O stats.
+	var ioDirect *sql.DB
+	var ioStatsBefore dbIOStats
+	if dbType == "postgres" {
+		ioDirect, _ = sql.Open("postgres", "host=127.0.0.1 port=5432 user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable")
+		if ioDirect != nil {
+			ioStatsBefore = readPGIOStats(ioDirect)
+		}
+	} else {
+		ioDirect, _ = sql.Open("mysql", "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3306)/tqdbproxy")
+		if ioDirect != nil {
+			ioStatsBefore = readMySQLIOStats(ioDirect)
+		}
+	}
 
 	// Choose query based on database backend and include batch hint
 	var insertQuery string
@@ -204,6 +208,19 @@ func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn st
 	totalBatches := readBatchCount() - batchCountBefore
 	var avgBatchSize float64
 
+	var dbFsyncs int64
+	if ioDirect != nil {
+		var ioStatsAfter dbIOStats
+		if dbType == "postgres" {
+			ioStatsAfter = readPGIOStats(ioDirect)
+			dbFsyncs = ioStatsAfter.pgFsyncs - ioStatsBefore.pgFsyncs
+		} else {
+			ioStatsAfter = readMySQLIOStats(ioDirect)
+			dbFsyncs = ioStatsAfter.mysqlLogWrites - ioStatsBefore.mysqlLogWrites
+		}
+		ioDirect.Close()
+	}
+
 	elapsed := time.Since(startTime)
 	total := totalOps.Load()
 	avgOpsPerSec := float64(total) / elapsed.Seconds()
@@ -214,13 +231,14 @@ func runBenchmark(targetOpsPerSec int, totalRecords int64, dbType string, dsn st
 	}
 
 	return BenchmarkResult{
-		TargetOpsPerSec: targetOpsPerSec,
+		TargetOpsPerSec: numWorkers,
 		BatchMs:         batchMs,
 		ActualOpsPerSec: avgOpsPerSec,
 		AvgLatencyMs:    avgLatencyMs,
 		TotalOps:        total,
 		TotalBatches:    totalBatches,
 		AvgBatchSize:    avgBatchSize,
+		DBFsyncs:        dbFsyncs,
 	}
 }
 
@@ -284,9 +302,15 @@ unset multiplot
 }
 
 func main() {
+	// Fixed concurrency: all runs use the same number of workers so that the
+	// only variable across runs is the batch window size.
+	const numWorkers = 1000
+	totalRecords := int64(100_000)
+
 	log.Println("Proxy Write Batching Throughput & Latency Benchmark")
 	log.Println("====================================================")
-	log.Println("Testing batching hint performance via proxy (3s each)")
+	log.Println("Testing batching hint performance via proxy")
+	log.Printf("(%d workers, %d total records each)", numWorkers, totalRecords)
 	log.Println()
 
 	// Start CPU profiling
@@ -300,33 +324,46 @@ func main() {
 	}
 	defer pprof.StopCPUProfile()
 
-	// Test rates with different batching hints
-	targets := []int{1_000, 10_000, 100_000, 1_000_000}
-	totalRecords := int64(10_000)
+	// Batch windows to test: 0 = no batching (baseline), then increasing windows.
+	batchWindows := []int{0, 1, 5, 10, 50, 100}
 
 	// PostgreSQL tests via proxy
-	log.Println("=== PostgreSQL Tests (via Proxy) ===")
+	log.Printf("=== PostgreSQL Tests (via Proxy, %d workers) ===", numWorkers)
 	pgDSN := "postgres://tqdbproxy:tqdbproxy@127.0.0.1:5433/tqdbproxy?sslmode=disable"
 	var pgResults []BenchmarkResult
-	for _, target := range targets {
-		result := runBenchmark(target, totalRecords, "postgres", pgDSN)
+	for _, batchMs := range batchWindows {
+		time.Sleep(250 * time.Millisecond) // Cooldown
+		result := runBenchmark(numWorkers, batchMs, totalRecords, "postgres", pgDSN)
 		pgResults = append(pgResults, result)
-		speedup := result.ActualOpsPerSec / float64(pgResults[0].ActualOpsPerSec)
-		log.Printf("  %dk target -> %.0f ops/sec, %.2f ms latency, %d batches (avg size %.1f) (%.1fx speedup)",
-			target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, result.TotalBatches, result.AvgBatchSize, speedup)
-		time.Sleep(1 * time.Second) // Cooldown
+		ioLabel := "fsyncs"
+		if batchMs == 0 {
+			log.Printf("  batch:%4dms -> %.0f ops/sec, %.2f ms latency, %d batches (avg %.1f), %s %d",
+				batchMs, result.ActualOpsPerSec, result.AvgLatencyMs, result.TotalBatches, result.AvgBatchSize,
+				ioLabel, result.DBFsyncs)
+		} else {
+			log.Printf("  batch:%4dms -> %.0f ops/sec, %.2f ms latency, %d batches (avg %.1f), %s %d",
+				batchMs, result.ActualOpsPerSec, result.AvgLatencyMs, result.TotalBatches, result.AvgBatchSize,
+				ioLabel, result.DBFsyncs)
+		}
 	}
 
 	// MariaDB tests via proxy
-	log.Println("\n=== MariaDB Tests (via Proxy) ===")
+	log.Printf("\n=== MariaDB Tests (via Proxy, %d workers) ===", numWorkers)
 	mysqlDSN := "tqdbproxy:tqdbproxy@tcp(127.0.0.1:3307)/tqdbproxy"
 	var mysqlResults []BenchmarkResult
-	for _, target := range targets {
-		result := runBenchmark(target, totalRecords, "mysql", mysqlDSN)
+	for _, batchMs := range batchWindows {
+		result := runBenchmark(numWorkers, batchMs, totalRecords, "mysql", mysqlDSN)
 		mysqlResults = append(mysqlResults, result)
-		speedup := result.ActualOpsPerSec / float64(mysqlResults[0].ActualOpsPerSec)
-		log.Printf("  %dk target -> %.0f ops/sec, %.2f ms latency, %d batches (avg size %.1f) (%.1fx speedup)",
-			target/1000, result.ActualOpsPerSec, result.AvgLatencyMs, result.TotalBatches, result.AvgBatchSize, speedup)
+		ioLabel := "writes"
+		if batchMs == 0 {
+			log.Printf("  batch:%4dms -> %.0f ops/sec, %.2f ms latency, %d batches (avg %.1f), %s %d",
+				batchMs, result.ActualOpsPerSec, result.AvgLatencyMs, result.TotalBatches, result.AvgBatchSize,
+				ioLabel, result.DBFsyncs)
+		} else {
+			log.Printf("  batch:%4dms -> %.0f ops/sec, %.2f ms latency, %d batches (avg %.1f), %s %d",
+				batchMs, result.ActualOpsPerSec, result.AvgLatencyMs, result.TotalBatches, result.AvgBatchSize,
+				ioLabel, result.DBFsyncs)
+		}
 		time.Sleep(1 * time.Second) // Cooldown
 	}
 
@@ -334,14 +371,6 @@ func main() {
 	generateBarChart(pgResults, "postgres")
 	generateBarChart(mysqlResults, "mysql")
 	generateGnuplotScript()
-
-	log.Println("\n=== Summary ===")
-	log.Printf("PostgreSQL: %.0f → %.0f ops/sec (%.1fx speedup)",
-		pgResults[0].ActualOpsPerSec, pgResults[len(pgResults)-1].ActualOpsPerSec,
-		pgResults[len(pgResults)-1].ActualOpsPerSec/pgResults[0].ActualOpsPerSec)
-	log.Printf("MariaDB: %.0f → %.0f ops/sec (%.1fx speedup)",
-		mysqlResults[0].ActualOpsPerSec, mysqlResults[len(mysqlResults)-1].ActualOpsPerSec,
-		mysqlResults[len(mysqlResults)-1].ActualOpsPerSec/mysqlResults[0].ActualOpsPerSec)
 
 	log.Println("\nTo generate graph, run:")
 	log.Println("  gnuplot plot_bars.gnu")

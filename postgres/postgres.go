@@ -563,9 +563,6 @@ func (p *Proxy) handleQuery(payload []byte, client net.Conn, db *sql.DB, state *
 		batchKey := parsed.GetBatchKey()
 		batchMs := parsed.BatchMs
 
-		log.Printf("[PostgreSQL] WRITEBATCH ROUTE (Query): query=%q, batchKey=%q, batchMs=%d",
-			query, batchKey, batchMs)
-
 		// Enqueue the write (blocks until result is available)
 		ctx := context.Background()
 		result := state.writeBatch.Enqueue(ctx, batchKey, parsed.Query, []interface{}{}, batchMs, func(batchSize int) {
@@ -1159,9 +1156,6 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 		// Use write batching - execute via db.Exec() which handles its own prepared statements
 		batchKey := parsed.GetBatchKey()
 		batchMs := parsed.BatchMs
-
-		log.Printf("[PostgreSQL] WRITEBATCH ROUTE: original query=%q, parsed.Query=%q, batchKey=%q, batchMs=%d, numParams=%d, params=%v",
-			query, parsed.Query, batchKey, batchMs, len(params), params)
 
 		// Enqueue the write (blocks until result is available)
 		// The writebatch executor will call db.Exec(parsed.Query, params...)
