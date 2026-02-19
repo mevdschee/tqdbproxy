@@ -291,12 +291,12 @@ unset title
 set title "MariaDB (via Proxy)"
 set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k inserts/sec)" textcolor rgb "blue"
-set y2label "Fsyncs" textcolor rgb "orange"
+set y2label "Writes" textcolor rgb "orange"
 set yrange [0:*]
 set y2range [0:*]
 
 plot 'bars_mysql.dat' using 2:xtic(1) title 'Throughput' axes x1y1 linecolor rgb "blue", \
-     'bars_mysql.dat' using 4 title 'Fsyncs' axes x1y2 linecolor rgb "orange"
+     'bars_mysql.dat' using 4 title 'Writes' axes x1y2 linecolor rgb "orange"
 
 unset multiplot
 `
