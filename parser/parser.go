@@ -1,3 +1,18 @@
+// Package parser provides lightweight SQL query analysis for extracting
+// metadata hints and query classification.
+//
+// The parser extracts SQL comment hints in the format:
+//
+//	/* ttl:60 file:app.go line:42 batch:10 */
+//
+// Where:
+//   - ttl: Cache TTL in seconds (SELECT queries only)
+//   - file: Source file name (for metrics and debugging)
+//   - line: Line number in source file
+//   - batch: Maximum batching window in milliseconds (write operations only)
+//
+// The parser is intentionally lightweight, using regex patterns rather than
+// a full SQL grammar parser to minimize latency in the proxy hot path.
 package parser
 
 import (
@@ -80,18 +95,19 @@ func Parse(query string) *ParsedQuery {
 		}
 		if matches[8] != "" {
 			batchMs, _ := strconv.Atoi(matches[8])
-			// Reject negative values
+			// Reject negative values - batching delay must be non-negative
 			if batchMs < 0 {
 				batchMs = 0
 			}
 			p.BatchMs = batchMs
 		}
-		// Remove the hint comment from the query
+		// Remove the hint comment from the query so it's not sent to backend
+		// This also ensures identical queries batch together regardless of hint differences
 		p.Query = hintRegex.ReplaceAllString(query, "")
 		p.Query = strings.TrimSpace(p.Query)
 	}
 
-	// TTL is silently ignored for writes
+	// TTL is silently ignored for writes - caching only applies to SELECT queries
 	if p.IsWritable() && p.TTL > 0 {
 		p.TTL = 0
 	}
@@ -113,15 +129,30 @@ func (p *ParsedQuery) IsWritable() bool {
 
 // IsBatchable returns true if write can be batched
 // INSERTs, UPDATEs, and DELETEs can be batched when they have a batch hint
-// Note: For UPDATE and DELETE, batching works when queries are identical
-// Transaction state is tracked at connection level
+//
+// Note: For UPDATE and DELETE, batching works when queries are identical.
+// Transaction state is tracked at connection level - batching is disabled
+// inside transactions to maintain ACID guarantees.
 func (p *ParsedQuery) IsBatchable() bool {
-	// A query is batchable if it's a write operation and has a batch hint
+	// A query is batchable if it's a write operation and has a batch hint > 0
 	return (p.Type == QueryInsert || p.Type == QueryUpdate || p.Type == QueryDelete) && p.BatchMs > 0
 }
 
 // GetBatchKey returns a key for grouping writes for batching
-// Uses the same approach as cache keys (the query itself)
+//
+// The batch key is the normalized query (with hints stripped). This ensures:
+//   - Identical queries batch together, regardless of hint metadata
+//   - Different queries create separate batches
+//   - Parameter values are part of the key (different values = different batches)
+//
+// Example:
+//
+//	Query 1: "/* batch:10 file:a.go line:1 */ INSERT INTO t VALUES (1)"
+//	Query 2: "/* batch:10 file:b.go line:2 */ INSERT INTO t VALUES (1)"
+//	Both have batch key: "INSERT INTO t VALUES (1)" - they batch together
+//
+//	Query 3: "/* batch:10 */ INSERT INTO t VALUES (2)"
+//	Has batch key: "INSERT INTO t VALUES (2)" - separate batch
 func (p *ParsedQuery) GetBatchKey() string {
 	return p.Query
 }

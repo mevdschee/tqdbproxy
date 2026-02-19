@@ -1,3 +1,5 @@
+// Package writebatch implements automatic batching of write operations.
+// See types.go for package documentation.
 package writebatch
 
 import (
@@ -32,8 +34,26 @@ func New(db *sql.DB, config Config) *Manager {
 	}
 }
 
-// Enqueue adds a write operation to the batch queue and waits for its result
-// batchMs is the maximum wait time in milliseconds (0 = execute immediately)
+// Enqueue adds a write operation to the batch queue and waits for its result.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - batchKey: Key for grouping operations (typically the normalized query)
+//   - query: The SQL query to execute
+//   - params: Query parameters
+//   - batchMs: Maximum wait time in milliseconds (0 = execute immediately)
+//   - onBatchComplete: Callback invoked when batch executes (receives batch size)
+//
+// Batching behavior:
+//   - batchMs == 0: Execute immediately without batching
+//   - batchMs > 0: Add to batch group, wait up to batchMs for more operations
+//   - Batch executes when: timer expires OR max_batch_size reached
+//
+// The function blocks until the operation completes or context is cancelled.
+// Each operation receives its individual WriteResult, including:
+//   - AffectedRows, LastInsertID (for INSERT)
+//   - BatchSize (number of operations in the batch)
+//   - Error (if any)
 func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []interface{}, batchMs int, onBatchComplete func(int)) WriteResult {
 	hasReturning := hasReturningClause(query)
 

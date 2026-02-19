@@ -1,3 +1,26 @@
+// Package writebatch implements automatic batching of write operations
+// (INSERT, UPDATE, DELETE) to improve database throughput.
+//
+// The batching system uses a hint-based approach where clients specify
+// batching windows via SQL comment hints:
+//
+//	/* batch:10 */ INSERT INTO logs (message) VALUES (?)
+//
+// How it works:
+//  1. Parser extracts batch hint (BatchMs) from SQL comment
+//  2. Write operation is added to a batch group based on its batch key
+//  3. First operation in group starts a timer for BatchMs milliseconds
+//  4. Additional operations join the batch until timer expires or max size reached
+//  5. Batch executes and each operation receives its individual result
+//
+// Key features:
+//   - Automatic grouping by query structure
+//   - Configurable batch windows (0-1000ms per query)
+//   - Maximum batch size limit (default 1000 operations)
+//   - Transaction-aware (batching disabled inside transactions)
+//   - Per-operation result delivery with batch size metadata
+//
+// See docs/components/writebatch/README.md for detailed documentation.
 package writebatch
 
 import (
