@@ -1,4 +1,4 @@
-module github.com/mevdschee/tqdbproxy/benchmarks/adaptive
+module github.com/mevdschee/tqdbproxy/benchmarks/batching
 
 go 1.24.0
 

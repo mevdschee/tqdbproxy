@@ -116,7 +116,7 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 			for time.Now().Before(endTime) {
 				reqStart := time.Now()
 				params[1] = time.Now().Unix()
-				result := manager.Enqueue(bgCtx, batchKey, query, params, batchMs)
+				result := manager.Enqueue(bgCtx, batchKey, query, params, batchMs, nil)
 
 				if result.Error == nil {
 					totalOps.Add(1)
