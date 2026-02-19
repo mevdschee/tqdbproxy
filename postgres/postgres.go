@@ -53,6 +53,12 @@ const (
 
 var connCounter uint32
 
+// isConnectionReset returns true for errors that indicate the client closed
+// the connection abruptly (normal pool teardown behaviour).
+func isConnectionReset(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "connection reset by peer")
+}
+
 func queryTypeLabel(t parser.QueryType) string {
 	switch t {
 	case parser.QuerySelect:
@@ -420,7 +426,7 @@ func (p *Proxy) handleMessages(client net.Conn, db *sql.DB, connID uint32, state
 	for {
 		msgType, payload, err := p.readMessage(client)
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !isConnectionReset(err) {
 				log.Printf("[PostgreSQL] Read error (conn %d): %v", connID, err)
 			}
 			return
@@ -846,6 +852,12 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 	rows := 2
 	if state.lastBatchSize > 0 {
 		response.Write(p.buildDataRow([]interface{}{"LastBatchSize", fmt.Sprintf("%d", state.lastBatchSize)}))
+		rows++
+	}
+
+	// Row: global batch counter
+	if p.writeBatch != nil {
+		response.Write(p.buildDataRow([]interface{}{"writebatch.batches.total", fmt.Sprintf("%d", p.writeBatch.BatchCount())}))
 		rows++
 	}
 

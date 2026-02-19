@@ -36,6 +36,9 @@ func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
 		return
 	}
 
+	// Count this batch
+	m.batchCount.Add(1)
+
 	// Log batch execution
 	log.Printf("[WriteBatch] Executing batch: size=%d, batchKey=%q, delay=%v",
 		batchSize, batchKey, time.Since(firstSeen))

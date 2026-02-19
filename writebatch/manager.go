@@ -12,10 +12,16 @@ import (
 
 // Manager handles batching of write operations
 type Manager struct {
-	groups sync.Map // map[string]*BatchGroup
-	config Config
-	db     *sql.DB
-	closed atomic.Bool
+	groups     sync.Map // map[string]*BatchGroup
+	config     Config
+	db         *sql.DB
+	closed     atomic.Bool
+	batchCount atomic.Int64
+}
+
+// BatchCount returns the total number of batches executed since the manager was created.
+func (m *Manager) BatchCount() int64 {
+	return m.batchCount.Load()
 }
 
 // New creates a new write batch manager

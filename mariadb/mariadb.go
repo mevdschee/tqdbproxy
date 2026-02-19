@@ -30,6 +30,12 @@ const (
 	backendTimeout = 30 * time.Second
 )
 
+// isConnectionReset returns true for errors that indicate the client closed
+// the connection without sending COM_QUIT (normal pool teardown behaviour).
+func isConnectionReset(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "connection reset by peer")
+}
+
 // Proxy implements a MariaDB server that forwards to backend
 type Proxy struct {
 	config     config.ProxyConfig
@@ -292,7 +298,7 @@ func (c *clientConn) run() {
 	for {
 		packet, err := c.readPacket()
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !isConnectionReset(err) {
 				log.Printf("[MariaDB] Read error (conn %d): %v", c.connID, err)
 			}
 			return
@@ -1662,6 +1668,11 @@ func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
 	// Add batch size if available (from last write batch operation)
 	if c.lastBatchSize > 0 {
 		query = fmt.Sprintf("%s UNION ALL SELECT 'LastBatchSize', '%d'", query, c.lastBatchSize)
+	}
+
+	// Add global batch counter
+	if c.proxy.writeBatch != nil {
+		query = fmt.Sprintf("%s UNION ALL SELECT 'writebatch.batches.total', '%d'", query, c.proxy.writeBatch.BatchCount())
 	}
 
 	response, err := c.execBackendQuery(query)
