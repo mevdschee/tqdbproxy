@@ -251,12 +251,13 @@ func generateBarChart(results []BenchmarkResult, dbType string) {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "# BatchHint Throughput(k) Latency(ms)\n")
+	fmt.Fprintf(f, "# BatchHint Throughput(k) Latency(ms) Fsyncs\n")
 	for _, r := range results {
-		fmt.Fprintf(f, "batch:%d %.1f %.2f\n",
+		fmt.Fprintf(f, "batch:%d %.1f %.2f %d\n",
 			r.BatchMs,
 			r.ActualOpsPerSec/1000,
-			r.AvgLatencyMs)
+			r.AvgLatencyMs,
+			r.DBFsyncs)
 	}
 }
 

@@ -1,7 +1,7 @@
-# BatchHint Throughput(k) Latency(ms)
-batch:0 27.9 35.71
-batch:1 40.8 24.36
-batch:5 37.3 26.71
-batch:10 31.1 32.01
-batch:50 23.6 42.29
-batch:100 22.9 43.03
+# BatchHint Throughput(k) Latency(ms) Fsyncs
+batch:0 42.5 23.44 3876
+batch:1 46.6 21.34 1176
+batch:5 38.9 25.63 450
+batch:10 31.3 31.75 233
+batch:50 25.3 39.07 105
+batch:100 25.3 39.45 103
