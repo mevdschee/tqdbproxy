@@ -59,7 +59,7 @@ func runExtremeTest() {
 	// Configure for maximum throughput
 	cfg := writebatch.Config{
 		MaxBatchSize: 2500,
-		//UseCopy:      true, // Enable PostgreSQL COPY for comparison
+		UseCopy:      true, // Enable PostgreSQL COPY for comparison
 	}
 
 	manager := writebatch.New(db, cfg)
@@ -95,7 +95,7 @@ func runExtremeTest() {
 	}()
 
 	// Generate load with many workers in tight loops
-	duration := 30 * time.Second
+	duration := 5 * time.Second
 	numWorkers := 25000 // Massive concurrency to saturate the system
 	var wg sync.WaitGroup
 
