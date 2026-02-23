@@ -59,7 +59,7 @@ func runExtremeTest() {
 	// Configure for maximum throughput
 	cfg := writebatch.Config{
 		MaxBatchSize: 2500,
-		UseCopy:      true, // Enable PostgreSQL COPY for comparison
+		UseCopy:      true, // Enable PostgreSQL COPY for comparison (ignores constraints)
 	}
 
 	manager := writebatch.New(db, cfg)
