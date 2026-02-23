@@ -26,7 +26,8 @@ type ProxyConfig struct {
 
 // WriteBatchConfig holds configuration for write batching
 type WriteBatchConfig struct {
-	MaxBatchSize int // Maximum batch size
+	MaxBatchSize int  // Maximum batch size
+	UseCopy      bool // Use PostgreSQL COPY for batch inserts (default: false)
 }
 
 // BackendConfig holds configuration for a single backend pool (primary + replicas)

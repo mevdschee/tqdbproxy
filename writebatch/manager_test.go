@@ -3,10 +3,12 @@ package writebatch
 import (
 	"context"
 	"database/sql"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -463,4 +465,280 @@ func BenchmarkManager_BatchedWrites(b *testing.B) {
 			m.Enqueue(ctx, "bench:batch", "INSERT INTO test_writes (data) VALUES (?)", []interface{}{"bench"}, 1, nil)
 		}
 	})
+}
+
+// setupPostgresDB sets up a test PostgreSQL database
+// Skips the test if PostgreSQL is not available
+func setupPostgresDB(t *testing.T) *sql.DB {
+	connStr := os.Getenv("POSTGRES_TEST_DSN")
+	if connStr == "" {
+		connStr = "host=127.0.0.1 port=5432 user=postgres password=postgres dbname=postgres sslmode=disable"
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		t.Skipf("PostgreSQL not available: %v", err)
+		return nil
+	}
+
+	// Test connection
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Skipf("PostgreSQL not available: %v", err)
+		return nil
+	}
+
+	// Create test table
+	_, err = db.Exec(`DROP TABLE IF EXISTS test_writes`)
+	if err != nil {
+		db.Close()
+		t.Fatalf("Failed to drop test table: %v", err)
+	}
+
+	_, err = db.Exec(`CREATE TABLE test_writes (
+		id SERIAL PRIMARY KEY,
+		data TEXT,
+		value INTEGER
+	)`)
+	if err != nil {
+		db.Close()
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+
+	return db
+}
+
+func TestPostgreSQL_CopyBatchInsert(t *testing.T) {
+	db := setupPostgresDB(t)
+	if db == nil {
+		return
+	}
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	ctx := context.Background()
+
+	// Create batched inserts with simple parameters (should use COPY)
+	const numInserts = 100
+	for i := 0; i < numInserts; i++ {
+		result := m.Enqueue(ctx, "test:pgcopy",
+			"INSERT INTO test_writes (data, value) VALUES ($1, $2)",
+			[]interface{}{"test", i}, 10, nil)
+
+		if result.Error != nil {
+			t.Fatalf("Insert %d failed: %v", i, result.Error)
+		}
+	}
+
+	// Wait a bit for batch to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify all rows were inserted
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM test_writes").Scan(&count)
+	if err != nil {
+		t.Fatalf("Count query failed: %v", err)
+	}
+
+	if count != numInserts {
+		t.Errorf("Expected %d rows, got %d", numInserts, count)
+	}
+
+	// Verify data integrity
+	rows, err := db.Query("SELECT data, value FROM test_writes ORDER BY value")
+	if err != nil {
+		t.Fatalf("Select query failed: %v", err)
+	}
+	defer rows.Close()
+
+	i := 0
+	for rows.Next() {
+		var data string
+		var value int
+		if err := rows.Scan(&data, &value); err != nil {
+			t.Fatalf("Scan failed: %v", err)
+		}
+
+		if data != "test" {
+			t.Errorf("Row %d: expected data='test', got '%s'", i, data)
+		}
+		if value != i {
+			t.Errorf("Row %d: expected value=%d, got %d", i, i, value)
+		}
+		i++
+	}
+
+	if i != numInserts {
+		t.Errorf("Expected to read %d rows, got %d", numInserts, i)
+	}
+}
+
+func TestPostgreSQL_MultiRowInsertFallback(t *testing.T) {
+	db := setupPostgresDB(t)
+	if db == nil {
+		return
+	}
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	ctx := context.Background()
+
+	// Insert with simple parameters - should work with both COPY and multi-row
+	const numInserts = 50
+	for i := 0; i < numInserts; i++ {
+		result := m.Enqueue(ctx, "test:pgmulti",
+			"INSERT INTO test_writes (data, value) VALUES ($1, $2)",
+			[]interface{}{"fallback", i + 100}, 10, nil)
+
+		if result.Error != nil {
+			t.Fatalf("Insert %d failed: %v", i, result.Error)
+		}
+	}
+
+	// Wait for batch to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify all rows were inserted
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM test_writes WHERE data = 'fallback'").Scan(&count)
+	if err != nil {
+		t.Fatalf("Count query failed: %v", err)
+	}
+
+	if count != numInserts {
+		t.Errorf("Expected %d rows, got %d", numInserts, count)
+	}
+}
+
+func TestAllParamsAreSimple(t *testing.T) {
+	tests := []struct {
+		name     string
+		requests []*WriteRequest
+		expected bool
+	}{
+		{
+			name: "all simple types",
+			requests: []*WriteRequest{
+				{Params: []interface{}{"test", 123, 45.6, true}},
+				{Params: []interface{}{"another", 789, 12.3, false}},
+			},
+			expected: true,
+		},
+		{
+			name: "includes nil",
+			requests: []*WriteRequest{
+				{Params: []interface{}{"test", nil, 123}},
+			},
+			expected: true,
+		},
+		{
+			name: "includes byte slice",
+			requests: []*WriteRequest{
+				{Params: []interface{}{[]byte("data"), 123}},
+			},
+			expected: true,
+		},
+		{
+			name: "includes complex type",
+			requests: []*WriteRequest{
+				{Params: []interface{}{"test", map[string]int{"key": 1}}},
+			},
+			expected: false,
+		},
+		{
+			name: "includes slice of ints",
+			requests: []*WriteRequest{
+				{Params: []interface{}{[]int{1, 2, 3}}},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := allParamsAreSimple(tt.requests)
+			if result != tt.expected {
+				t.Errorf("allParamsAreSimple() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseInsertStatement(t *testing.T) {
+	tests := []struct {
+		name        string
+		query       string
+		wantTable   string
+		wantColumns []string
+		wantErr     bool
+	}{
+		{
+			name:        "simple insert",
+			query:       "INSERT INTO test_writes (data, value) VALUES ($1, $2)",
+			wantTable:   "test_writes",
+			wantColumns: []string{"data", "value"},
+			wantErr:     false,
+		},
+		{
+			name:        "insert with extra spaces",
+			query:       "INSERT INTO  users  ( name , email )  VALUES ($1, $2)",
+			wantTable:   "users",
+			wantColumns: []string{"name", "email"},
+			wantErr:     false,
+		},
+		{
+			name:        "insert with single column",
+			query:       "INSERT INTO logs (message) VALUES ($1)",
+			wantTable:   "logs",
+			wantColumns: []string{"message"},
+			wantErr:     false,
+		},
+		{
+			name:    "not an insert",
+			query:   "SELECT * FROM test",
+			wantErr: true,
+		},
+		{
+			name:    "missing column list",
+			query:   "INSERT INTO test VALUES ($1, $2)",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			table, columns, err := parseInsertStatement(tt.query)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseInsertStatement() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("parseInsertStatement() unexpected error: %v", err)
+				return
+			}
+
+			if table != tt.wantTable {
+				t.Errorf("parseInsertStatement() table = %v, want %v", table, tt.wantTable)
+			}
+
+			if len(columns) != len(tt.wantColumns) {
+				t.Errorf("parseInsertStatement() columns length = %v, want %v", len(columns), len(tt.wantColumns))
+				return
+			}
+
+			for i, col := range columns {
+				if col != tt.wantColumns[i] {
+					t.Errorf("parseInsertStatement() column[%d] = %v, want %v", i, col, tt.wantColumns[i])
+				}
+			}
+		})
+	}
 }

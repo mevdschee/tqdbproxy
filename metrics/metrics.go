@@ -121,6 +121,15 @@ var (
 		[]string{"query_type"},
 	)
 
+	// WriteBatchMethod counts batches by execution method
+	WriteBatchMethod = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "tqdbproxy_write_batch_method_total",
+			Help: "Total batches executed by method (copy, multi_row_insert, prepared, transaction)",
+		},
+		[]string{"method"},
+	)
+
 	once sync.Once
 )
 
@@ -141,6 +150,7 @@ func Init() {
 		prometheus.MustRegister(WriteCurrentDelay)
 		prometheus.MustRegister(WriteDelayAdjustments)
 		prometheus.MustRegister(WriteBatchedTotal)
+		prometheus.MustRegister(WriteBatchMethod)
 	})
 }
 

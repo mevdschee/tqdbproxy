@@ -1,11 +1,13 @@
 package writebatch
 
 import (
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/mevdschee/tqdbproxy/metrics"
 )
 
@@ -126,11 +128,14 @@ func (m *Manager) executeBatchedWrites(requests []*WriteRequest) {
 		if !requests[0].HasReturning && isBatchableInsert(firstQuery) {
 			m.executeTrueBatchedInsert(requests)
 		} else if isBatchableDelete(firstQuery) {
+			metrics.WriteBatchMethod.WithLabelValues("batched_delete").Inc()
 			m.executeTrueBatchedDelete(requests)
 		} else {
+			metrics.WriteBatchMethod.WithLabelValues("prepared").Inc()
 			m.executePreparedBatch(requests)
 		}
 	} else {
+		metrics.WriteBatchMethod.WithLabelValues("transaction").Inc()
 		m.executeTransactionBatch(requests)
 	}
 }
@@ -341,8 +346,196 @@ func isBatchableInsert(query string) bool {
 		(q[len(q)-1] == ')' || q[len(q)-1] == ' ')
 }
 
-// executeTrueBatchedInsert combines multiple INSERTs into one multi-value INSERT
+// executeTrueBatchedInsert combines multiple INSERTs into one optimized operation
+// Uses PostgreSQL COPY when enabled and possible, otherwise falls back to multi-value INSERT
 func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
+	firstQuery := requests[0].Query
+	numParams := len(requests[0].Params)
+
+	// For queries with parameters, check if we can use PostgreSQL COPY
+	if m.config.UseCopy && numParams > 0 {
+		isPostgres := containsPostgresPlaceholder(firstQuery)
+
+		// Use COPY for PostgreSQL when all parameters are simple values
+		if isPostgres && allParamsAreSimple(requests) {
+			metrics.WriteBatchMethod.WithLabelValues("copy").Inc()
+			m.executeCopyBatchedInsert(requests)
+			return
+		}
+	}
+
+	// Fall back to multi-row INSERT for all other cases
+	metrics.WriteBatchMethod.WithLabelValues("multi_row_insert").Inc()
+	m.executeTrueBatchedInsertMultiRow(requests)
+}
+
+// parseInsertStatement extracts table name and column names from INSERT statement
+// Returns (tableName, []columnNames, error)
+func parseInsertStatement(query string) (string, []string, error) {
+	// Normalize query
+	q := strings.TrimSpace(query)
+	upperQ := strings.ToUpper(q)
+
+	// Find INSERT INTO position
+	insertPos := strings.Index(upperQ, "INSERT")
+	if insertPos == -1 {
+		return "", nil, fmt.Errorf("not an INSERT statement")
+	}
+
+	intoPos := strings.Index(upperQ[insertPos:], "INTO")
+	if intoPos == -1 {
+		return "", nil, fmt.Errorf("missing INTO clause")
+	}
+	intoPos += insertPos + 4 // Position after "INTO"
+
+	// Find table name (between INTO and either '(' or VALUES)
+	remaining := strings.TrimSpace(q[intoPos:])
+
+	// Find the end of table name
+	tableEnd := -1
+	for i, ch := range remaining {
+		if ch == '(' || ch == ' ' {
+			tableEnd = i
+			break
+		}
+	}
+
+	if tableEnd == -1 {
+		return "", nil, fmt.Errorf("cannot parse table name")
+	}
+
+	tableName := strings.TrimSpace(remaining[:tableEnd])
+
+	// Find column list (between first '(' and ')')
+	openParen := strings.Index(remaining, "(")
+	if openParen == -1 {
+		return "", nil, fmt.Errorf("missing column list")
+	}
+
+	closeParen := strings.Index(remaining[openParen:], ")")
+	if closeParen == -1 {
+		return "", nil, fmt.Errorf("unclosed column list")
+	}
+
+	columnList := remaining[openParen+1 : openParen+closeParen]
+
+	// Split columns by comma
+	columns := strings.Split(columnList, ",")
+	for i := range columns {
+		columns[i] = strings.TrimSpace(columns[i])
+	}
+
+	return tableName, columns, nil
+}
+
+// allParamsAreSimple checks if all parameters across all requests are simple values
+// (not expressions, functions, or complex types)
+func allParamsAreSimple(requests []*WriteRequest) bool {
+	for _, req := range requests {
+		for _, param := range req.Params {
+			// Check if the param is a basic type
+			switch param.(type) {
+			case nil, bool, int, int8, int16, int32, int64,
+				uint, uint8, uint16, uint32, uint64,
+				float32, float64, string, []byte:
+				// Simple type, continue
+			default:
+				// Complex type, not suitable for COPY
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// executeCopyBatchedInsert uses PostgreSQL COPY for bulk insert
+func (m *Manager) executeCopyBatchedInsert(requests []*WriteRequest) {
+	firstQuery := requests[0].Query
+
+	// Parse INSERT statement to extract table and column names
+	tableName, columns, err := parseInsertStatement(firstQuery)
+	if err != nil {
+		// Fall back to multi-row INSERT
+		m.executeTrueBatchedInsertMultiRow(requests)
+		return
+	}
+
+	// Prepare COPY statement
+	txn, err := m.db.Begin()
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	stmt, err := txn.Prepare(pq.CopyIn(tableName, columns...))
+	if err != nil {
+		txn.Rollback()
+		// Fall back to multi-row INSERT
+		m.executeTrueBatchedInsertMultiRow(requests)
+		return
+	}
+
+	// Execute COPY with all rows
+	for _, req := range requests {
+		_, err := stmt.Exec(req.Params...)
+		if err != nil {
+			stmt.Close()
+			txn.Rollback()
+			for _, r := range requests {
+				r.ResultChan <- WriteResult{Error: err}
+			}
+			return
+		}
+	}
+
+	// Close the COPY statement
+	_, err = stmt.Exec()
+	if err != nil {
+		stmt.Close()
+		txn.Rollback()
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		txn.Rollback()
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	// Commit transaction
+	err = txn.Commit()
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	// Send results to all requests
+	// Note: COPY doesn't return LastInsertId, so we set it to 0
+	for _, req := range requests {
+		req.ResultChan <- WriteResult{
+			AffectedRows: 1,
+			LastInsertID: 0, // COPY doesn't provide last insert ID
+			BatchSize:    len(requests),
+		}
+		// Notify connection of batch completion
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
+		}
+	}
+}
+
+// executeTrueBatchedInsertMultiRow is the original multi-row INSERT implementation
+func (m *Manager) executeTrueBatchedInsertMultiRow(requests []*WriteRequest) {
 	firstQuery := requests[0].Query
 
 	// Find the VALUES clause (case-insensitive)

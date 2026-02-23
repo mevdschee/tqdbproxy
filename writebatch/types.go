@@ -58,13 +58,15 @@ type BatchGroup struct {
 
 // Config holds configuration for the write batch manager
 type Config struct {
-	MaxBatchSize int // Maximum number of operations per batch (1000 default)
+	MaxBatchSize int  // Maximum number of operations per batch (1000 default)
+	UseCopy      bool // Use PostgreSQL COPY for batch inserts (false default, typically slower for small-medium batches)
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
 		MaxBatchSize: 1000,
+		UseCopy:      false, // COPY has transaction overhead, multi-row INSERT is faster for typical batching
 	}
 }
 
