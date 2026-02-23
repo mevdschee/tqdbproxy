@@ -131,8 +131,6 @@ func (m *Manager) Enqueue(ctx context.Context, batchKey, query string, params []
 		return result
 	case <-ctx.Done():
 		return WriteResult{Error: ctx.Err()}
-	case <-time.After(30 * time.Second):
-		return WriteResult{Error: ErrTimeout}
 	}
 }
 

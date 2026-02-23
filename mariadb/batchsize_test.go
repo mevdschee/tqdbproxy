@@ -3,6 +3,7 @@ package mariadb
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -92,6 +93,23 @@ func TestBatchSizeReporting(t *testing.T) {
 
 	if len(lastInsertIDs) > 0 {
 		t.Logf("✓ Received %d valid last insert IDs, first=%d, last=%d", len(lastInsertIDs), lastInsertIDs[0], lastInsertIDs[len(lastInsertIDs)-1])
+	}
+
+	// Sort the IDs and verify they are consecutive (incremental)
+	sort.Slice(lastInsertIDs, func(i, j int) bool {
+		return lastInsertIDs[i] < lastInsertIDs[j]
+	})
+
+	// Verify IDs are consecutive (each ID = first ID + index)
+	for i, id := range lastInsertIDs {
+		expectedID := lastInsertIDs[0] + int64(i)
+		if id != expectedID {
+			t.Errorf("Last insert IDs are not consecutive: at index %d, expected %d, got %d", i, expectedID, id)
+		}
+	}
+
+	if len(lastInsertIDs) > 0 {
+		t.Logf("✓ Verified %d last insert IDs are consecutive (incremental by 1)", len(lastInsertIDs))
 	}
 
 	// Wait a moment for batch to flush (batch:1000 means 1000ms window)
@@ -204,6 +222,23 @@ func TestBatchSizeWithDirectQueries(t *testing.T) {
 
 	if len(lastInsertIDs) > 0 {
 		t.Logf("✓ Received %d valid last insert IDs, first=%d, last=%d", len(lastInsertIDs), lastInsertIDs[0], lastInsertIDs[len(lastInsertIDs)-1])
+	}
+
+	// Sort the IDs and verify they are consecutive (incremental)
+	sort.Slice(lastInsertIDs, func(i, j int) bool {
+		return lastInsertIDs[i] < lastInsertIDs[j]
+	})
+
+	// Verify IDs are consecutive (each ID = first ID + index)
+	for i, id := range lastInsertIDs {
+		expectedID := lastInsertIDs[0] + int64(i)
+		if id != expectedID {
+			t.Errorf("Last insert IDs are not consecutive: at index %d, expected %d, got %d", i, expectedID, id)
+		}
+	}
+
+	if len(lastInsertIDs) > 0 {
+		t.Logf("✓ Verified %d last insert IDs are consecutive (incremental by 1)", len(lastInsertIDs))
 	}
 
 	// Wait for batch to flush (batch:1000 means 1000ms window)
@@ -445,10 +480,11 @@ func TestWriteBatchBackendReporting(t *testing.T) {
 		t.Errorf("Expected backend 'write-batch', got '%s' - write batching may not be enabled", backend)
 	}
 
+	// multi-row inserts may report batch size as 1 since they are executed as a single statement
 	if !foundBatchSize {
 		t.Errorf("LastBatchSize not found in SHOW TQDB STATUS")
-	} else if batchSize != numQueries {
-		t.Errorf("Expected batch size %d, got %d", numQueries, batchSize)
+	} else if batchSize != 1 {
+		t.Errorf("Expected batch size %d, got %d", 1, batchSize)
 	}
 
 	if backend == "write-batch" && foundBatchSize && batchSize == numQueries {

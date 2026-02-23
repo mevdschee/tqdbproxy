@@ -62,13 +62,7 @@ func runExtremeTest() {
 
 	// Configure for maximum throughput
 	cfg := writebatch.Config{
-		InitialDelayMs:  100, // Longer delay for maximum batching
-		MaxDelayMs:      100,
-		MinDelayMs:      100,
-		MaxBatchSize:    1000,
-		WriteThreshold:  2000000,
-		AdaptiveStep:    1.0,
-		MetricsInterval: 1,
+		MaxBatchSize: 1000,
 	}
 
 	manager := writebatch.New(db, cfg)
@@ -129,7 +123,7 @@ func runExtremeTest() {
 			// Tight loop - minimize allocations
 			for time.Now().Before(endTime) {
 				params[1] = time.Now().Unix()
-				result := manager.Enqueue(bgCtx, batchKey, query, params)
+				result := manager.Enqueue(bgCtx, batchKey, query, params, 100, nil)
 
 				if result.Error == nil {
 					totalOps.Add(1)

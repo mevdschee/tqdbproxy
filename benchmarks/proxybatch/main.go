@@ -54,7 +54,8 @@ type BenchmarkResult struct {
 	TotalOps        int64
 	TotalBatches    int64
 	AvgBatchSize    float64
-	DBFsyncs        int64 // PG: wal_sync delta; MariaDB: Innodb_log_writes delta
+	DBFsyncs        int64   // PG: wal_sync delta; MariaDB: Innodb_log_writes delta
+	DBFsyncsPerSec  float64 // PG: wal_sync/sec; MariaDB: Innodb_log_writes/sec
 }
 
 func runBenchmark(numWorkers int, batchMs int, totalRecords int64, dbType string, dsn string) BenchmarkResult {
@@ -230,6 +231,8 @@ func runBenchmark(numWorkers int, batchMs int, totalRecords int64, dbType string
 		avgBatchSize = float64(total) / float64(totalBatches)
 	}
 
+	dbFsyncsPerSec := float64(dbFsyncs) / elapsed.Seconds()
+
 	return BenchmarkResult{
 		TargetOpsPerSec: numWorkers,
 		BatchMs:         batchMs,
@@ -239,6 +242,7 @@ func runBenchmark(numWorkers int, batchMs int, totalRecords int64, dbType string
 		TotalBatches:    totalBatches,
 		AvgBatchSize:    avgBatchSize,
 		DBFsyncs:        dbFsyncs,
+		DBFsyncsPerSec:  dbFsyncsPerSec,
 	}
 }
 
@@ -251,13 +255,13 @@ func generateBarChart(results []BenchmarkResult, dbType string) {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "# BatchHint Throughput(k) Latency(ms) Fsyncs\n")
+	fmt.Fprintf(f, "# BatchHint Throughput(k) Latency(ms) Fsyncs/sec\n")
 	for _, r := range results {
-		fmt.Fprintf(f, "batch:%d %.1f %.2f %d\n",
+		fmt.Fprintf(f, "batch:%d %.1f %.2f %.1f\n",
 			r.BatchMs,
 			r.ActualOpsPerSec/1000,
 			r.AvgLatencyMs,
-			r.DBFsyncs)
+			r.DBFsyncsPerSec)
 	}
 }
 
@@ -272,7 +276,7 @@ set multiplot layout 1,2 title "Proxy Hint-Based Write Batching Performance (100
 set title "PostgreSQL (via Proxy)"
 set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k inserts/sec)" textcolor rgb "blue"
-set y2label "Fsyncs" textcolor rgb "orange"
+set y2label "Fsyncs/sec" textcolor rgb "orange"
 set yrange [0:*]
 set y2range [0:*]
 set ytics nomirror
@@ -291,7 +295,7 @@ unset title
 set title "MariaDB (via Proxy)"
 set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k inserts/sec)" textcolor rgb "blue"
-set y2label "Writes" textcolor rgb "orange"
+set y2label "Writes/sec" textcolor rgb "orange"
 set yrange [0:*]
 set y2range [0:*]
 

@@ -28,6 +28,126 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestManager_InsertReturning(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	ctx := context.Background()
+	result := m.Enqueue(ctx, "test:returning", "INSERT INTO test_writes (data, value) VALUES (?, ?) RETURNING id", []interface{}{"foo", 123}, 0, nil)
+
+	if result.Error != nil {
+		t.Logf("RETURNING not supported: %v", result.Error)
+		return
+	}
+
+	if len(result.ReturningValues) == 1 {
+		if id, ok := result.ReturningValues[0].(int64); !ok || id <= 0 {
+			t.Errorf("Expected positive int64 id, got %v", result.ReturningValues[0])
+		}
+	} else {
+		t.Logf("No returning values, driver may not support RETURNING")
+	}
+}
+
+func TestManager_InsertLastInsertId_MySQL(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	ctx := context.Background()
+	result := m.Enqueue(ctx, "test:mysql", "INSERT INTO test_writes (data, value) VALUES (?, ?)", []interface{}{"bar", 456}, 0, nil)
+
+	if result.Error != nil {
+		t.Fatalf("Expected no error, got %v", result.Error)
+	}
+
+	if result.LastInsertID <= 0 {
+		t.Errorf("Expected positive LastInsertID, got %d", result.LastInsertID)
+	}
+	if len(result.ReturningValues) != 0 {
+		t.Errorf("Expected no returning values for MySQL, got %d", len(result.ReturningValues))
+	}
+}
+
+func TestManager_DeleteReturning(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	// Insert a row to delete
+	_, err := db.Exec("INSERT INTO test_writes (data, value) VALUES (?, ?)", "bar", 456)
+	if err != nil {
+		t.Fatalf("insert setup failed: %v", err)
+	}
+
+	ctx := context.Background()
+	result := m.Enqueue(ctx, "test:delreturn", "DELETE FROM test_writes WHERE value = ? RETURNING id", []interface{}{456}, 0, nil)
+
+	if result.Error != nil {
+		t.Logf("RETURNING not supported: %v", result.Error)
+		return
+	}
+
+	if len(result.ReturningValues) == 1 {
+		if id, ok := result.ReturningValues[0].(int64); !ok || id <= 0 {
+			t.Errorf("Expected positive int64 id, got %v", result.ReturningValues[0])
+		}
+	} else {
+		t.Logf("No returning values, driver may not support RETURNING")
+	}
+}
+
+func TestManager_BatchDeleteAggregation(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	// Insert rows to delete
+	for i := 1; i <= 5; i++ {
+		_, err := db.Exec("INSERT INTO test_writes (data, value) VALUES (?, ?)", "row", i)
+		if err != nil {
+			t.Fatalf("insert setup failed: %v", err)
+		}
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	results := make([]WriteResult, 5)
+
+	// Enqueue 5 identical DELETEs with different keys
+	for i := 1; i <= 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx-1] = m.Enqueue(ctx, "del", "DELETE FROM test_writes WHERE value = ?", []interface{}{idx}, 1, nil)
+		}(i)
+	}
+	wg.Wait()
+
+	// All should succeed
+	for i, res := range results {
+		if res.Error != nil {
+			t.Errorf("delete %d failed: %v", i+1, res.Error)
+		}
+	}
+
+	// Table should be empty
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM test_writes").Scan(&count)
+	if count != 0 {
+		t.Errorf("expected 0 rows after delete, got %d", count)
+	}
+}
+
 func TestManager_SingleWrite(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

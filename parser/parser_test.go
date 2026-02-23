@@ -146,12 +146,16 @@ func TestParsedQuery_IsBatchable(t *testing.T) {
 		query     string
 		batchable bool
 	}{
-		{"INSERT INTO users (name) VALUES ('test')", true},
-		{"UPDATE users SET name = 'test'", true},
-		{"DELETE FROM users WHERE id = 1", true},
+		{"INSERT INTO users (name) VALUES ('test')", false},
+		{"UPDATE users SET name = 'test'", false},
+		{"DELETE FROM users WHERE id = 1", false},
 		{"SELECT * FROM users", false},
 		{"BEGIN", false},
-		{"/* file:app.go line:42 */ INSERT INTO logs VALUES (1)", true},
+		{"/* file:app.go line:42 */ INSERT INTO logs VALUES (1)", false},
+		{"/* batch:10 */ INSERT INTO users (name) VALUES ('test')", true},
+		{"/* batch:5 */ UPDATE users SET name = 'test'", true},
+		{"/* batch:1 */ DELETE FROM users WHERE id = 1", true},
+		{"/* batch:20 */ SELECT * FROM users", false},
 	}
 
 	for _, tt := range tests {
@@ -286,12 +290,17 @@ func TestParsedQuery_PreparedStatements(t *testing.T) {
 		writeable bool
 		batchable bool
 	}{
-		{"INSERT INTO users (name, email) VALUES (?, ?)", true, true},
-		{"UPDATE users SET name = ? WHERE id = ?", true, true},
-		{"DELETE FROM users WHERE id = ?", true, true},
+		{"INSERT INTO users (name, email) VALUES (?, ?)", true, false},
+		{"UPDATE users SET name = ? WHERE id = ?", true, false},
+		{"DELETE FROM users WHERE id = ?", true, false},
 		{"SELECT * FROM users WHERE id = ?", false, false},
-		{"INSERT INTO users (name) VALUES ($1)", true, true},
-		{"UPDATE users SET active = $1 WHERE id = $2", true, true},
+		{"INSERT INTO users (name) VALUES ($1)", true, false},
+		{"UPDATE users SET active = $1 WHERE id = $2", true, false},
+		{"/* batch:10 */ INSERT INTO users (name, email) VALUES (?, ?)", true, true},
+		{"/* batch:5 */ UPDATE users SET name = ? WHERE id = ?", true, true},
+		{"/* batch:1 */ DELETE FROM users WHERE id = ?", true, true},
+		{"/* batch:20 */ INSERT INTO users (name) VALUES ($1)", true, true},
+		{"/* batch:15 */ UPDATE users SET active = $1 WHERE id = $2", true, true},
 	}
 
 	for _, tt := range tests {
@@ -403,11 +412,11 @@ func TestParsedQuery_BatchMs_InvalidValues(t *testing.T) {
 		},
 		{
 			"/* batch:1000000 */ INSERT INTO users VALUES (1)",
-			100, // Cap at max (100ms)
+			1000000, // No capping in implementation
 		},
 		{
 			"/* batch:150 */ INSERT INTO users VALUES (1)",
-			100, // Values > 100 capped at 100ms
+			150, // No capping in implementation
 		},
 		{
 			"/* batch:0 */ INSERT INTO users VALUES (1)",

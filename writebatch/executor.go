@@ -123,9 +123,103 @@ func (m *Manager) executeBatchedWrites(requests []*WriteRequest) {
 	}
 
 	if allSame {
-		m.executePreparedBatch(requests)
+		if !requests[0].HasReturning && isBatchableInsert(firstQuery) {
+			m.executeTrueBatchedInsert(requests)
+		} else if isBatchableDelete(firstQuery) {
+			m.executeTrueBatchedDelete(requests)
+		} else {
+			m.executePreparedBatch(requests)
+		}
 	} else {
 		m.executeTransactionBatch(requests)
+	}
+}
+
+// isBatchableDelete checks if query is a simple DELETE FROM ... WHERE key = ?
+func isBatchableDelete(query string) bool {
+	// Skip leading comments and whitespace
+	q := query
+	for {
+		q = strings.TrimSpace(q)
+		if strings.HasPrefix(q, "/*") {
+			// Skip comment
+			endIdx := strings.Index(q, "*/")
+			if endIdx == -1 {
+				break
+			}
+			q = q[endIdx+2:]
+		} else {
+			break
+		}
+	}
+
+	// Only support: DELETE FROM table WHERE key = ?
+	if !strings.HasPrefix(strings.ToUpper(q), "DELETE FROM ") {
+		return false
+	}
+	whereIdx := strings.Index(strings.ToUpper(q), " WHERE ")
+	if whereIdx == -1 {
+		return false
+	}
+	whereClause := q[whereIdx+7:]
+	// Only support single equality predicate, e.g. id = ?
+	parts := strings.Split(whereClause, "=")
+	if len(parts) != 2 {
+		return false
+	}
+	if strings.Count(whereClause, "?") != 1 {
+		return false
+	}
+	return true
+}
+
+// executeTrueBatchedDelete combines multiple DELETEs into one DELETE ... WHERE key IN (...)
+func (m *Manager) executeTrueBatchedDelete(requests []*WriteRequest) {
+	// Parse key column from query
+	firstQuery := requests[0].Query
+	whereIdx := strings.Index(strings.ToUpper(firstQuery), " WHERE ")
+	whereClause := firstQuery[whereIdx+7:]
+	keyCol := strings.TrimSpace(strings.Split(whereClause, "=")[0])
+
+	// Build combined DELETE
+	baseQuery := firstQuery[:whereIdx]
+	var builder strings.Builder
+	builder.WriteString(baseQuery)
+	builder.WriteString(" WHERE ")
+	builder.WriteString(keyCol)
+	builder.WriteString(" IN (")
+	for i := range requests {
+		if i > 0 {
+			builder.WriteString(",")
+		}
+		builder.WriteString("?")
+	}
+	builder.WriteString(")")
+
+	// Collect all key values
+	allParams := make([]interface{}, 0, len(requests))
+	for _, req := range requests {
+		allParams = append(allParams, req.Params[0])
+	}
+
+	// Execute batched delete
+	result, err := m.db.Exec(builder.String(), allParams...)
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+	affected, _ := result.RowsAffected()
+	// Send results to all requests
+	for _, req := range requests {
+		req.ResultChan <- WriteResult{
+			AffectedRows: affected, // total affected, not per-request
+			BatchSize:    len(requests),
+		}
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
+		}
 	}
 }
 
@@ -223,23 +317,40 @@ func (m *Manager) executePreparedBatch(requests []*WriteRequest) {
 
 // isBatchableInsert checks if query is a simple INSERT that can be batched
 func isBatchableInsert(query string) bool {
-	// Simple check for INSERT INTO ... VALUES pattern
-	return len(query) > 12 &&
-		(query[0:6] == "INSERT" || query[0:6] == "insert") &&
-		(query[len(query)-1] == ')' || query[len(query)-1] == ' ')
+	// Skip leading comments and whitespace
+	q := query
+	for {
+		q = strings.TrimSpace(q)
+		if strings.HasPrefix(q, "/*") {
+			// Skip comment
+			endIdx := strings.Index(q, "*/")
+			if endIdx == -1 {
+				break
+			}
+			q = q[endIdx+2:]
+		} else {
+			break
+		}
+	}
+
+	// Check for INSERT INTO ... VALUES pattern
+	qUpper := strings.ToUpper(q)
+	return len(q) > 12 &&
+		strings.HasPrefix(qUpper, "INSERT") &&
+		strings.Contains(qUpper, " VALUES") &&
+		(q[len(q)-1] == ')' || q[len(q)-1] == ' ')
 }
 
 // executeTrueBatchedInsert combines multiple INSERTs into one multi-value INSERT
 func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
 	firstQuery := requests[0].Query
 
-	// Find the VALUES clause
+	// Find the VALUES clause (case-insensitive)
 	valuesIdx := -1
-	for i := 0; i < len(firstQuery)-6; i++ {
-		if firstQuery[i:i+6] == "VALUES" || firstQuery[i:i+6] == "values" {
-			valuesIdx = i + 6
-			break
-		}
+	upperQuery := strings.ToUpper(firstQuery)
+	valuesPos := strings.Index(upperQuery, "VALUES")
+	if valuesPos != -1 {
+		valuesIdx = valuesPos + 6 // Position after "VALUES"
 	}
 
 	if valuesIdx == -1 {
@@ -251,6 +362,62 @@ func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
 	// Build multi-value INSERT
 	baseQuery := firstQuery[:valuesIdx]
 	numParams := len(requests[0].Params)
+
+	log.Printf("[WriteBatch] executeTrueBatchedInsert: firstQuery=%q, valuesIdx=%d, baseQuery=%q, numParams=%d",
+		firstQuery, valuesIdx, baseQuery, numParams)
+
+	// Handle direct queries (no parameters) - extract the VALUES clause from the original query
+	if numParams == 0 {
+		// Extract the VALUES clause from the original query
+		valuesClause := strings.TrimSpace(firstQuery[valuesIdx:])
+
+		log.Printf("[WriteBatch] Direct query: valuesClause=%q, numRequests=%d", valuesClause, len(requests))
+
+		// Use strings.Builder for efficient string concatenation
+		var builder strings.Builder
+		estimatedSize := len(baseQuery) + len(requests)*len(valuesClause) + len(requests)*2
+		builder.Grow(estimatedSize)
+
+		builder.WriteString(baseQuery)
+		builder.WriteString(" ")
+
+		// Repeat the VALUES clause for each request
+		for reqIdx := range requests {
+			if reqIdx > 0 {
+				builder.WriteString(", ")
+			}
+			builder.WriteString(valuesClause)
+		}
+
+		// Execute batched query (no parameters needed)
+		batchQuery := builder.String()
+		log.Printf("[WriteBatch] Direct query batch: %s", batchQuery)
+		result, err := m.db.Exec(batchQuery)
+		if err != nil {
+			log.Printf("[WriteBatch] Direct query batch ERROR: %v", err)
+			for _, req := range requests {
+				req.ResultChan <- WriteResult{Error: err}
+			}
+			return
+		}
+
+		_, _ = result.RowsAffected()
+		firstID, _ := result.LastInsertId()
+
+		// Send results to all requests
+		for i, req := range requests {
+			req.ResultChan <- WriteResult{
+				AffectedRows: 1, // Each request affects 1 row
+				LastInsertID: firstID + int64(i),
+				BatchSize:    len(requests),
+			}
+			// Notify connection of batch completion
+			if req.OnBatchComplete != nil {
+				req.OnBatchComplete(len(requests))
+			}
+		}
+		return
+	}
 
 	// Detect if using PostgreSQL placeholders ($1) or MySQL/SQLite placeholders (?)
 	isPostgres := len(firstQuery) > 0 && containsPostgresPlaceholder(firstQuery)
