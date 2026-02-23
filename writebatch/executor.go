@@ -363,15 +363,10 @@ func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
 	baseQuery := firstQuery[:valuesIdx]
 	numParams := len(requests[0].Params)
 
-	log.Printf("[WriteBatch] executeTrueBatchedInsert: firstQuery=%q, valuesIdx=%d, baseQuery=%q, numParams=%d",
-		firstQuery, valuesIdx, baseQuery, numParams)
-
 	// Handle direct queries (no parameters) - extract the VALUES clause from the original query
 	if numParams == 0 {
 		// Extract the VALUES clause from the original query
 		valuesClause := strings.TrimSpace(firstQuery[valuesIdx:])
-
-		log.Printf("[WriteBatch] Direct query: valuesClause=%q, numRequests=%d", valuesClause, len(requests))
 
 		// Use strings.Builder for efficient string concatenation
 		var builder strings.Builder
@@ -391,10 +386,8 @@ func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
 
 		// Execute batched query (no parameters needed)
 		batchQuery := builder.String()
-		log.Printf("[WriteBatch] Direct query batch: %s", batchQuery)
 		result, err := m.db.Exec(batchQuery)
 		if err != nil {
-			log.Printf("[WriteBatch] Direct query batch ERROR: %v", err)
 			for _, req := range requests {
 				req.ResultChan <- WriteResult{Error: err}
 			}

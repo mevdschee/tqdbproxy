@@ -11,17 +11,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/lib/pq"
 	"github.com/mevdschee/tqdbproxy/writebatch"
 )
 
 func runExtremeTest() {
-	log.Println("=== Extreme Throughput Test (SQLite with Batched Inserts) ===")
+	log.Println("=== Extreme Throughput Test (PostgreSQL with Batched Inserts) ===")
 	log.Println("Configuration:")
 	log.Println("  - Delay: 100ms (maximum batching)")
 	log.Println("  - Batch Size: 1000")
-	log.Println("  - Workers: 50000 (high concurrency)")
-	log.Println("  - Backend: SQLite with actual batched INSERT statements")
+	log.Println("  - Workers: 5000 (high concurrency)")
+	log.Println("  - Backend: PostgreSQL with actual batched INSERT statements")
 	log.Println("  - Optimization: Reduced allocations, reused contexts")
 	log.Println("  - Target: >1M ops/sec")
 	log.Println()
@@ -41,24 +41,20 @@ func runExtremeTest() {
 	log.Println("CPU profiling enabled -> cpu.prof")
 	log.Println()
 
-	// Create SQLite database
-	db, err := sql.Open("sqlite3", "file:test.db?cache=shared&mode=memory")
+	// Create PostgreSQL database connection
+	connStr := "host=127.0.0.1 port=5432 user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable"
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table
-	_, err = db.Exec("CREATE TABLE test (id INTEGER PRIMARY KEY AUTOINCREMENT, value INTEGER, created_at INTEGER)")
+	// Drop table if exists and create fresh
+	db.Exec("DROP TABLE IF EXISTS test")
+	_, err = db.Exec("CREATE TABLE test (id SERIAL PRIMARY KEY, value INTEGER, created_at BIGINT)")
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Optimize SQLite for performance
-	db.Exec("PRAGMA journal_mode=WAL")
-	db.Exec("PRAGMA synchronous=NORMAL")
-	db.Exec("PRAGMA cache_size=10000")
-	db.Exec("PRAGMA temp_store=MEMORY")
 
 	// Configure for maximum throughput
 	cfg := writebatch.Config{
@@ -99,7 +95,7 @@ func runExtremeTest() {
 
 	// Generate load with many workers in tight loops
 	duration := 30 * time.Second
-	numWorkers := 50000 // Massive concurrency to saturate the system
+	numWorkers := 5000 // Massive concurrency to saturate the system
 	var wg sync.WaitGroup
 
 	startTime := time.Now()
@@ -116,7 +112,7 @@ func runExtremeTest() {
 			defer wg.Done()
 
 			// Pre-allocate and reuse to reduce GC pressure
-			query := "INSERT INTO test (value, created_at) VALUES (?, ?)"
+			query := "INSERT INTO test (value, created_at) VALUES ($1, $2)"
 			batchKey := "INSERT"
 			params := []interface{}{workerID, int64(0)}
 
