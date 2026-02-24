@@ -69,6 +69,7 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 
 	cfg := writebatch.Config{
 		MaxBatchSize: 1000,
+		//UseCopy:      true,
 	}
 
 	manager := writebatch.New(db, cfg)
@@ -84,11 +85,11 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 	// Scale workers based on target rate to avoid over-saturation at low rates
 	var numWorkers int
 	if targetOpsPerSec <= 10_000 {
-		numWorkers = 1000 // Fewer workers for low rates
+		numWorkers = 200 // Fewer workers for low rates
 	} else if targetOpsPerSec <= 100_000 {
-		numWorkers = 10000
+		numWorkers = 2000
 	} else {
-		numWorkers = 50000 // Max workers for high rates
+		numWorkers = 20000 // Max workers for high rates
 	}
 
 	startTime := time.Now()
@@ -116,12 +117,18 @@ func runBenchmark(targetOpsPerSec int, duration time.Duration, dbType string, ds
 			for time.Now().Before(endTime) {
 				reqStart := time.Now()
 				params[1] = time.Now().Unix()
-				result := manager.Enqueue(bgCtx, batchKey, query, params, batchMs, nil)
-
-				if result.Error == nil {
+				// onBatchComplete callback
+				onBatchComplete := func(batchSize int) {
 					totalOps.Add(1)
 					totalLatencyNs.Add(time.Since(reqStart).Nanoseconds())
 				}
+				manager.Enqueue(bgCtx, batchKey, query, params, batchMs, onBatchComplete)
+
+				//result := manager.Enqueue(bgCtx, batchKey, query, params, batchMs, onBatchComplete)
+				// if result.Error == nil {
+				// 	totalOps.Add(1)
+				// 	totalLatencyNs.Add(time.Since(reqStart).Nanoseconds())
+				// }
 			}
 		}(i)
 	}
@@ -173,8 +180,8 @@ set title "PostgreSQL"
 set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k ops/sec)" textcolor rgb "blue"
 set y2label "Latency (ms)" textcolor rgb "red"
-set yrange [0:*]
-set y2range [0:*]
+set yrange [0:1000]
+set y2range [0:50]
 set ytics nomirror
 set y2tics
 set style data histograms
@@ -192,8 +199,8 @@ set title "MariaDB"
 set xlabel "Batch Hint (ms)"
 set ylabel "Throughput (k ops/sec)" textcolor rgb "blue"
 set y2label "Latency (ms)" textcolor rgb "red"
-set yrange [0:*]
-set y2range [0:*]
+set yrange [0:1000]
+set y2range [0:50]
 
 plot 'bars_mysql.dat' using 2:xtic(1) title 'Throughput' axes x1y1 linecolor rgb "blue", \
      'bars_mysql.dat' using 3 title 'Latency' axes x1y2 linecolor rgb "red"
