@@ -1,15 +1,22 @@
 package writebatch
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/lib/pq"
 	"github.com/mevdschee/tqdbproxy/metrics"
 )
+
+// loadDataHandlerSeq generates unique handler names for LOAD DATA LOCAL INFILE.
+var loadDataHandlerSeq atomic.Uint64
 
 // executeBatch executes a batch of write requests
 func (m *Manager) executeBatch(batchKey string, group *BatchGroup) {
@@ -347,21 +354,27 @@ func isBatchableInsert(query string) bool {
 }
 
 // executeTrueBatchedInsert combines multiple INSERTs into one optimized operation
-// Uses PostgreSQL COPY when enabled and possible, otherwise falls back to multi-value INSERT
+// Uses PostgreSQL COPY or MariaDB LOAD DATA LOCAL INFILE when enabled and possible,
+// otherwise falls back to multi-value INSERT.
 func (m *Manager) executeTrueBatchedInsert(requests []*WriteRequest) {
 	firstQuery := requests[0].Query
 	numParams := len(requests[0].Params)
 
-	// For queries with parameters, check if we can use PostgreSQL COPY
-	if m.config.UseCopy && numParams > 0 {
+	// For queries with parameters, check if we can use a bulk-load mechanism
+	if m.config.UseCopy && numParams > 0 && allParamsAreSimple(requests) {
 		isPostgres := containsPostgresPlaceholder(firstQuery)
 
-		// Use COPY for PostgreSQL when all parameters are simple values
-		if isPostgres && allParamsAreSimple(requests) {
+		if isPostgres {
+			// PostgreSQL: use COPY
 			metrics.WriteBatchMethod.WithLabelValues("copy").Inc()
 			m.executeCopyBatchedInsert(requests)
 			return
 		}
+
+		// MySQL/MariaDB: use LOAD DATA LOCAL INFILE
+		metrics.WriteBatchMethod.WithLabelValues("load_data_infile").Inc()
+		m.executeLoadDataInfileBatchedInsert(requests)
+		return
 	}
 
 	// Fall back to multi-row INSERT for all other cases
@@ -532,6 +545,155 @@ func (m *Manager) executeCopyBatchedInsert(requests []*WriteRequest) {
 			req.OnBatchComplete(len(requests))
 		}
 	}
+}
+
+// executeLoadDataInfileBatchedInsert uses MariaDB/MySQL LOAD DATA LOCAL INFILE for bulk insert.
+// It is the MySQL equivalent of PostgreSQL's COPY command.
+func (m *Manager) executeLoadDataInfileBatchedInsert(requests []*WriteRequest) {
+	firstQuery := requests[0].Query
+
+	// Parse INSERT statement to extract table and column names
+	tableName, columns, err := parseInsertStatement(firstQuery)
+	if err != nil {
+		// Fall back to multi-row INSERT
+		m.executeTrueBatchedInsertMultiRow(requests)
+		return
+	}
+
+	// Build a tab-separated CSV payload in memory.
+	// LOAD DATA LOCAL INFILE uses \t as the default field delimiter and \n as the row delimiter.
+	var buf bytes.Buffer
+	for _, req := range requests {
+		for i, param := range req.Params {
+			if i > 0 {
+				buf.WriteByte('\t')
+			}
+			buf.WriteString(formatLoadDataParam(param))
+		}
+		buf.WriteByte('\n')
+	}
+
+	// Register a unique handler so concurrent batches don't collide.
+	seq := loadDataHandlerSeq.Add(1)
+	handlerName := fmt.Sprintf("writebatch_%d", seq)
+	data := buf.Bytes()
+	mysql.RegisterReaderHandler(handlerName, func() io.Reader {
+		return bytes.NewReader(data)
+	})
+	defer mysql.DeregisterReaderHandler(handlerName)
+
+	// Build column list for the LOAD DATA statement.
+	quotedCols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCols[i] = "`" + col + "`"
+	}
+	loadQuery := fmt.Sprintf(
+		"LOAD DATA LOCAL INFILE 'Reader::%s' INTO TABLE `%s` (%s)",
+		handlerName, tableName, strings.Join(quotedCols, ", "),
+	)
+
+	txn, err := m.db.Begin()
+	if err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	_, err = txn.Exec(loadQuery)
+	if err != nil {
+		txn.Rollback()
+		// Fall back to multi-row INSERT on error
+		log.Printf("[WriteBatch] LOAD DATA LOCAL INFILE failed (%v), falling back to multi-row INSERT", err)
+		m.executeTrueBatchedInsertMultiRow(requests)
+		return
+	}
+
+	if err = txn.Commit(); err != nil {
+		for _, req := range requests {
+			req.ResultChan <- WriteResult{Error: err}
+		}
+		return
+	}
+
+	// Send results to all requests.
+	// LOAD DATA doesn't return per-row LastInsertId, so we set it to 0.
+	for _, req := range requests {
+		req.ResultChan <- WriteResult{
+			AffectedRows: 1,
+			LastInsertID: 0, // LOAD DATA INFILE doesn't provide last insert ID
+			BatchSize:    len(requests),
+		}
+		if req.OnBatchComplete != nil {
+			req.OnBatchComplete(len(requests))
+		}
+	}
+}
+
+// formatLoadDataParam formats a single parameter value for use in a LOAD DATA LOCAL INFILE
+// tab-separated payload, applying MySQL's default escape rules.
+func formatLoadDataParam(v interface{}) string {
+	if v == nil {
+		return `\N` // MySQL NULL representation in LOAD DATA
+	}
+	switch val := v.(type) {
+	case bool:
+		if val {
+			return "1"
+		}
+		return "0"
+	case int:
+		return strconv.FormatInt(int64(val), 10)
+	case int8:
+		return strconv.FormatInt(int64(val), 10)
+	case int16:
+		return strconv.FormatInt(int64(val), 10)
+	case int32:
+		return strconv.FormatInt(int64(val), 10)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case uint:
+		return strconv.FormatUint(uint64(val), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(val), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(val), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(val), 10)
+	case uint64:
+		return strconv.FormatUint(val, 10)
+	case float32:
+		return strconv.FormatFloat(float64(val), 'f', -1, 32)
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case string:
+		return escapeLoadDataString(val)
+	case []byte:
+		return escapeLoadDataString(string(val))
+	default:
+		return escapeLoadDataString(fmt.Sprintf("%v", v))
+	}
+}
+
+// escapeLoadDataString escapes a string for use in a LOAD DATA LOCAL INFILE payload.
+// MySQL uses backslash escaping; we must escape \, \t, \n, and \r.
+func escapeLoadDataString(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		switch ch {
+		case '\\':
+			b.WriteString(`\\`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
 }
 
 // executeTrueBatchedInsertMultiRow is the original multi-row INSERT implementation

@@ -59,14 +59,14 @@ type BatchGroup struct {
 // Config holds configuration for the write batch manager
 type Config struct {
 	MaxBatchSize int  // Maximum number of operations per batch (1000 default)
-	UseCopy      bool // Use PostgreSQL COPY for batch inserts (false default, typically slower for small-medium batches)
+	UseCopy      bool // Use COPY-style bulk loading for batch inserts: PostgreSQL COPY or MariaDB LOAD DATA LOCAL INFILE (false default)
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
 		MaxBatchSize: 1000,
-		UseCopy:      false, // COPY has transaction overhead, multi-row INSERT is faster for typical batching
+		UseCopy:      false, // COPY/LOAD DATA has transaction overhead; multi-row INSERT is faster for typical batching
 	}
 }
 

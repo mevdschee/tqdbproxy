@@ -1,5 +1,5 @@
 # BatchHint Throughput(k) Latency(ms)
-batch:0 26.3 7.51
-batch:1 82.9 2.37
-batch:10 517.2 3.79
-batch:100 682.6 27.99
+batch:0 25.3 7.83
+batch:1 83.0 2.36
+batch:10 525.3 3.74
+batch:100 685.2 27.79

@@ -103,6 +103,7 @@ func (p *Proxy) Start() error {
 	// Initialize write batching
 	wbCfg := writebatch.Config{
 		MaxBatchSize: p.config.WriteBatch.MaxBatchSize,
+		UseCopy:      p.config.WriteBatch.UseCopy,
 	}
 	p.writeBatch = writebatch.New(db, wbCfg)
 	log.Printf("[MariaDB] Write batching started")
