@@ -1669,11 +1669,6 @@ func (c *clientConn) handleShowTQDBStatus(moreResults bool) error {
 		query = fmt.Sprintf("%s UNION ALL SELECT 'LastBatchSize', '%d'", query, c.lastBatchSize)
 	}
 
-	// Add global batch counter
-	if c.proxy.writeBatch != nil {
-		query = fmt.Sprintf("%s UNION ALL SELECT 'writebatch.batches.total', '%d'", query, c.proxy.writeBatch.BatchCount())
-	}
-
 	response, err := c.execBackendQuery(query)
 	if err != nil {
 		return err

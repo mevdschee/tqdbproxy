@@ -425,6 +425,12 @@ func parseInsertStatement(query string) (string, []string, error) {
 		return "", nil, fmt.Errorf("missing column list")
 	}
 
+	// If "VALUES" appears before the first '(', there is no column list
+	betweenTableAndParen := strings.ToUpper(remaining[tableEnd:openParen])
+	if strings.Contains(betweenTableAndParen, "VALUES") {
+		return "", nil, fmt.Errorf("missing column list")
+	}
+
 	closeParen := strings.Index(remaining[openParen:], ")")
 	if closeParen == -1 {
 		return "", nil, fmt.Errorf("unclosed column list")
@@ -750,7 +756,8 @@ func (m *Manager) executeTrueBatchedInsertMultiRow(requests []*WriteRequest) {
 		}
 
 		_, _ = result.RowsAffected()
-		firstID, _ := result.LastInsertId()
+		rawID, _ := result.LastInsertId()
+		firstID := m.normalizeFirstInsertID(rawID, len(requests))
 
 		// Send results to all requests
 		for i, req := range requests {
@@ -817,7 +824,8 @@ func (m *Manager) executeTrueBatchedInsertMultiRow(requests []*WriteRequest) {
 	}
 
 	_, _ = result.RowsAffected()
-	firstID, _ := result.LastInsertId()
+	rawID, _ := result.LastInsertId()
+	firstID := m.normalizeFirstInsertID(rawID, len(requests))
 
 	// Send results to all requests
 	for i, req := range requests {
@@ -831,6 +839,16 @@ func (m *Manager) executeTrueBatchedInsertMultiRow(requests []*WriteRequest) {
 			req.OnBatchComplete(len(requests))
 		}
 	}
+}
+
+// normalizeFirstInsertID returns the ID of the first inserted row for a multi-row INSERT.
+// MySQL/MariaDB report last_insert_id() = first row's ID.
+// SQLite reports last_insert_rowid() = last row's ID; subtract (n-1) to get the first.
+func (m *Manager) normalizeFirstInsertID(rawID int64, batchSize int) int64 {
+	if m.firstInsertIDIsFirst {
+		return rawID // MySQL: rawID already is the first row's ID
+	}
+	return rawID - int64(batchSize-1) // SQLite: rawID is the last row's ID
 }
 
 // containsPostgresPlaceholder checks if query uses PostgreSQL $1 syntax

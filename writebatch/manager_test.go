@@ -106,6 +106,77 @@ func TestManager_DeleteReturning(t *testing.T) {
 	}
 }
 
+// TestManager_BatchInsertLastInsertID verifies that each request in a batched
+// multi-row INSERT receives its own correct LastInsertID, not the ID of the
+// first or last row in the batch.
+func TestManager_BatchInsertLastInsertID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	m := New(db, DefaultConfig())
+	defer m.Close()
+
+	ctx := context.Background()
+	const batchSize = 5
+	results := make([]WriteResult, batchSize)
+	var wg sync.WaitGroup
+	wg.Add(batchSize)
+
+	for i := 0; i < batchSize; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = m.Enqueue(ctx, "test:lastid",
+				"INSERT INTO test_writes (data, value) VALUES (?, ?)",
+				[]interface{}{"lastid", idx}, 10, nil)
+		}(i)
+	}
+	wg.Wait()
+
+	// All requests must succeed
+	for i, res := range results {
+		if res.Error != nil {
+			t.Fatalf("request %d failed: %v", i, res.Error)
+		}
+	}
+
+	// Each LastInsertID must be positive
+	for i, res := range results {
+		if res.LastInsertID <= 0 {
+			t.Errorf("request %d: expected positive LastInsertID, got %d", i, res.LastInsertID)
+		}
+	}
+
+	// All LastInsertIDs must be unique (each row gets its own ID)
+	seen := make(map[int64]bool)
+	for i, res := range results {
+		if seen[res.LastInsertID] {
+			t.Errorf("request %d: duplicate LastInsertID %d", i, res.LastInsertID)
+		}
+		seen[res.LastInsertID] = true
+	}
+
+	// The set of IDs must be consecutive (no gaps within the batch)
+	min, max := results[0].LastInsertID, results[0].LastInsertID
+	for _, res := range results[1:] {
+		if res.LastInsertID < min {
+			min = res.LastInsertID
+		}
+		if res.LastInsertID > max {
+			max = res.LastInsertID
+		}
+	}
+	if max-min != int64(batchSize-1) {
+		t.Errorf("IDs are not consecutive: min=%d max=%d batchSize=%d", min, max, batchSize)
+	}
+
+	// Verify all rows exist in the database
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM test_writes WHERE data = 'lastid'").Scan(&count)
+	if count != batchSize {
+		t.Errorf("expected %d rows in DB, got %d", batchSize, count)
+	}
+}
+
 func TestManager_BatchDeleteAggregation(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
@@ -472,7 +543,7 @@ func BenchmarkManager_BatchedWrites(b *testing.B) {
 func setupPostgresDB(t *testing.T) *sql.DB {
 	connStr := os.Getenv("POSTGRES_TEST_DSN")
 	if connStr == "" {
-		connStr = "host=127.0.0.1 port=5432 user=postgres password=postgres dbname=postgres sslmode=disable"
+		connStr = "host=127.0.0.1 port=5432 user=tqdbproxy password=tqdbproxy dbname=tqdbproxy sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", connStr)
@@ -611,6 +682,33 @@ func TestPostgreSQL_MultiRowInsertFallback(t *testing.T) {
 
 	if count != numInserts {
 		t.Errorf("Expected %d rows, got %d", numInserts, count)
+	}
+
+	// Verify per-row data integrity
+	rows, err := db.Query("SELECT data, value FROM test_writes WHERE data = 'fallback' ORDER BY value")
+	if err != nil {
+		t.Fatalf("Select query failed: %v", err)
+	}
+	defer rows.Close()
+
+	i := 0
+	for rows.Next() {
+		var data string
+		var value int
+		if err := rows.Scan(&data, &value); err != nil {
+			t.Fatalf("Scan failed: %v", err)
+		}
+		if data != "fallback" {
+			t.Errorf("Row %d: expected data='fallback', got '%s'", i, data)
+		}
+		if value != i+100 {
+			t.Errorf("Row %d: expected value=%d, got %d", i, i+100, value)
+		}
+		i++
+	}
+
+	if i != numInserts {
+		t.Errorf("Expected to read %d rows, got %d", numInserts, i)
 	}
 }
 

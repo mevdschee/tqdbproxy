@@ -5,6 +5,7 @@ package writebatch
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -14,11 +15,12 @@ import (
 
 // Manager handles batching of write operations
 type Manager struct {
-	groups     sync.Map // map[string]*BatchGroup
-	config     Config
-	db         *sql.DB
-	closed     atomic.Bool
-	batchCount atomic.Int64
+	groups              sync.Map // map[string]*BatchGroup
+	config              Config
+	db                  *sql.DB
+	closed              atomic.Bool
+	batchCount          atomic.Int64
+	firstInsertIDIsFirst bool // true for MySQL/MariaDB (last_insert_id = first row), false for SQLite (last_insert_rowid = last row)
 }
 
 // BatchCount returns the total number of batches executed since the manager was created.
@@ -28,9 +30,14 @@ func (m *Manager) BatchCount() int64 {
 
 // New creates a new write batch manager
 func New(db *sql.DB, config Config) *Manager {
+	// MySQL/MariaDB return the first auto-generated ID for multi-row INSERTs.
+	// SQLite (and some other drivers) return the last inserted row's ID instead.
+	driverType := fmt.Sprintf("%T", db.Driver())
+	firstIDIsFirst := strings.Contains(strings.ToLower(driverType), "mysql")
 	return &Manager{
-		db:     db,
-		config: config,
+		db:                  db,
+		config:              config,
+		firstInsertIDIsFirst: firstIDIsFirst,
 	}
 }
 
