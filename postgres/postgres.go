@@ -90,7 +90,6 @@ type connState struct {
 	lastBackend        string
 	shard              string
 	lastCacheHit       bool
-	lastBatchSize      int
 	pool               *replica.Pool
 	user               string
 	password           string
@@ -102,6 +101,7 @@ type connState struct {
 	portalStatements   map[string]string        // portal name -> statement name
 	writeBatch         *writebatch.Manager      // write batching manager for this connection
 	inTransaction      bool                     // track transaction state
+	lastBatchSize      int                      // batch size from last write-batch operation
 }
 
 // New creates a new PostgreSQL proxy
@@ -852,12 +852,6 @@ func (p *Proxy) handleShowTQDBStatus(client net.Conn, state *connState) {
 		rows++
 	}
 
-	// Row: global batch counter
-	if p.writeBatch != nil {
-		response.Write(p.buildDataRow([]interface{}{"writebatch.batches.total", fmt.Sprintf("%d", p.writeBatch.BatchCount())}))
-		rows++
-	}
-
 	// CommandComplete
 	cmdPayload := append([]byte(fmt.Sprintf("SELECT %d", rows)), 0)
 	response.Write(p.encodeMessage(msgCommandComplete, cmdPayload))
@@ -1215,7 +1209,6 @@ func (p *Proxy) handleExecute(payload []byte, client net.Conn, db *sql.DB, connI
 			binary.Write(&dataRow, binary.BigEndian, int32(4)) // length of int32
 			binary.Write(&dataRow, binary.BigEndian, valInt32) // the actual value
 
-			log.Printf("[PostgreSQL] Sending binary DataRow for RETURNING: value=%d", valInt32)
 			response.Write(p.encodeMessage(msgDataRow, dataRow.Bytes()))
 
 			// Send CommandComplete with row count
